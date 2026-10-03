@@ -31,6 +31,10 @@ compile_commands.json
 .DS_Store
 Thumbs.db
 
+# Tooling / session data
+.omo/
+.codebuddy/
+
 # Local build trees (this project uses build_* prefixes)
 build*/
 build_*/
