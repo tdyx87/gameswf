@@ -1,0 +1,3 @@
+@echo off
+echo Opening gameswf.sln in VS2017...
+start "" "d:\Downloads\gameswf-master\build_vs2017\gameswf.sln"
