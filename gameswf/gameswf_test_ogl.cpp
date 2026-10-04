@@ -330,6 +330,7 @@ int	main(int argc, char *argv[])
 		bool	do_loop = true;
 		bool	sdl_abort = true;
 		bool	sdl_cursor = true;
+		bool	auto_click_scan = false;
 		float	tex_lod_bias;
 		bool	force_realtime_framerate = false;
 
@@ -354,6 +355,16 @@ int	main(int argc, char *argv[])
 
 		for (int arg = 1; arg < argc; arg++)
 		{
+			if (strcmp(argv[arg], "-sc") == 0)
+			{
+				// Test hook: sweep the mouse over a grid and click each point,
+				// so click/mouseUp dispatch can be exercised without a user.
+				auto_click_scan = true;
+				// Headless: no window/GL needed, just advance the timeline.
+				do_render = false;
+				continue;
+			}
+
 			if (argv[arg][0] == '-')
 			{
 				// Looks like an option.
@@ -779,14 +790,17 @@ int	main(int argc, char *argv[])
 				}
 
 				// Set the video mode.
-//				if (SDL_SetVideoMode(width, height, s_bit_depth, SDL_OPENGL | SDL_RESIZABLE) == 0)
-				if (SDL_SetVideoMode(width, height, s_bit_depth, SDL_OPENGL) == 0)
+				if (do_render)
 				{
-					fprintf(stderr, "SDL_SetVideoMode() failed.");
-					exit(1);
-				}
+				//				if (SDL_SetVideoMode(width, height, s_bit_depth, SDL_OPENGL | SDL_RESIZABLE) == 0)
+					if (SDL_SetVideoMode(width, height, s_bit_depth, SDL_OPENGL) == 0)
+					{
+						fprintf(stderr, "SDL_SetVideoMode() failed.");
+						exit(1);
+					}
 
-				render->open();
+					render->open();
+				}
 				render->set_antialiased(s_antialiased);
 
 				// Turn on alpha blending.
@@ -1100,7 +1114,62 @@ int	main(int argc, char *argv[])
 			m->set_display_viewport(0, 0, width, height);
 			m->set_background_alpha(s_background ? 1.0f : 0.05f);
 
-				m->notify_mouse_state(mouse_x, mouse_y, mouse_buttons);
+				// Test hook (-sc): move the mouse over a grid of points and click
+			// each one, so mouse/click dispatch runs without a real user.
+			if (auto_click_scan)
+			{
+				const int GRID_W = 12;
+				const int GRID_H = 12;
+				static int s_scan_frame = 0;
+				s_scan_frame++;
+
+				const int first_frame = 150;	// let the intro play first
+				if (s_scan_frame > first_frame)
+				{
+					const int cycle = s_scan_frame - first_frame;
+					const int point = cycle / 4;	// 4 frames per grid point
+					const int phase = cycle % 4;	// 0 move, 1 press, 2 release, 3 idle
+
+					if (point >= GRID_W * GRID_H)
+					{
+						// Scan finished; exit the headless test loop.
+						fprintf(stderr, "[SCAN] finished; exiting\n");
+						fflush(stderr);
+						break;
+					}
+
+					if (point < GRID_W * GRID_H)
+					{
+						const int gx = point % GRID_W;
+						const int gy = point / GRID_W;
+						const int mw = (int) m->get_movie_width();
+						const int mh = (int) m->get_movie_height();
+
+						mouse_x = (int) ((gx + 0.5f) * mw / GRID_W);
+						mouse_y = (int) ((gy + 0.5f) * mh / GRID_H);
+
+						switch (phase)
+						{
+						case 0:
+							mouse_buttons = 0;
+							fprintf(stderr, "[SCAN] point=%d gx=%d gy=%d mouse=%d,%d\n",
+								point, gx, gy, mouse_x, mouse_y);
+							break;
+						case 1:
+							mouse_buttons = 1;	// press (left button)
+							break;
+						case 2:
+							mouse_buttons = 0;	// release -> should fire click
+							break;
+						default:
+							mouse_buttons = 0;
+							break;
+						}
+					}
+				}
+			}
+
+			m->notify_mouse_state(mouse_x, mouse_y, mouse_buttons);
 
 				Uint32 t_advance = tu_timer::get_ticks();
 				m->advance(delta_t * speed_scale);
@@ -1112,7 +1181,10 @@ int	main(int argc, char *argv[])
 				}
 
 				Uint32 t_display = tu_timer::get_ticks();
-				m->display();
+				if (do_render)
+				{
+					m->display();
+				}
 				t_display = tu_timer::get_ticks() - t_display;
 
 			if (do_render)

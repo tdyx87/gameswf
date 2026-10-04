@@ -56,6 +56,6 @@ temp/
 *.log
 stderr*.txt
 stdout*.txt
-diag_*.txt
+diag*.txt
 trace_*.txt
 gl_diag.log

@@ -620,17 +620,41 @@ namespace gameswf
 
 		// find name
 		tu_string class_name = full_class_name;
+		// strip package ("a.b.C" -> "C") and AS3 namespace ("a.b::C" -> "C")
 		const char* dot = strrchr(full_class_name.c_str(), '.');
-		if (dot)
+		const char* colon = strrchr(full_class_name.c_str(), ':');
+		const char* cut = NULL;
+		if (colon && dot)
 		{
-			class_name = dot + 1;
+			cut = (colon > dot) ? colon : dot;
+		}
+		else if (dot)
+		{
+			cut = dot;
+		}
+		else if (colon)
+		{
+			cut = colon;
+		}
+		if (cut)
+		{
+			class_name = cut + 1;
 		}
 
 		// maybe use hash instead of array for m_instance ?
 		for (int i = 0; i < m_instance.size(); i++)
 		{
-			const tu_string& name = get_multiname(m_instance[i]->m_name);
-			if (class_name == name)
+			const tu_string& full = get_multiname(m_instance[i]->m_name);
+			// compare local names (strip package '.' and AS3 namespace '::')
+			tu_string stored = full;
+			const char* sdot = strrchr(full.c_str(), '.');
+			const char* scolon = strrchr(full.c_str(), ':');
+			const char* scut = NULL;
+			if (sdot && scolon) scut = (scolon > sdot) ? scolon : sdot;
+			else if (sdot) scut = sdot;
+			else if (scolon) scut = scolon;
+			if (scut) stored = scut + 1;
+			if (class_name == stored)
 			{
 				return m_instance[i].get();
 			}

@@ -359,9 +359,17 @@ namespace gameswf
 		if (fn.this_ptr)
 		{
 			this_ptr = fn.this_ptr;
-			if (this_ptr->m_this_ptr != NULL)
+
+			// m_this_ptr passes the object being built along a constructor
+			// chain.  It is a weak_ptr, so it can already be released; taking
+			// it unconditionally replaced a perfectly good receiver with NULL,
+			// which left 'this' undefined inside the method and silently broke
+			// unqualified calls such as stop() (they end up with no receiver,
+			// so the timeline never stops and the clip keeps looping).
+			as_object* chained_this = this_ptr->m_this_ptr.get_ptr();
+			if (chained_this != NULL)
 			{
-				this_ptr = this_ptr->m_this_ptr.get_ptr();
+				this_ptr = chained_this;
 			}
 		}
 
@@ -1131,6 +1139,9 @@ namespace gameswf
 								const char* super_name = m_abc->get_multiname(ii->m_super_name);
 								if (super_name)
 								{
+									fprintf(stderr, "[EXTD2] class='%s' super='%s'\n",
+										class_name_str.c_str(), super_name);
+									fflush(stderr);
 									// Check if parent is a known display class
 									// Also check grandparent for deeper custom class chains like:
 									// CustomUI extends CustomSprite extends Sprite
@@ -1188,9 +1199,18 @@ namespace gameswf
 							{
 								is_display_object = false;
 								new_object = new as_object(get_player());
+								fprintf(stderr, "[BIRTH-CP] obj=%p name='%s'\n", (void*) new_object.get_ptr(), name ? name : "?");
+								fflush(stderr);
 								// Set instance info so get_member can search instance traits
 								// for methods defined in the AS3 instance body.
 								new_object->set_instance(m_abc->get_instance_info(name));
+								{
+									instance_info* dii = m_abc->get_instance_info(name);
+									const char* dsuper = (dii && dii->m_super_name > 0) ? m_abc->get_multiname(dii->m_super_name) : "?";
+									fprintf(stderr, "[CPC-PLAIN] name='%s' super='%s' ii=%p\n",
+										name ? name : "?", dsuper ? dsuper : "?", (void*) dii);
+									fflush(stderr);
+								}
 							}
 						}
 
@@ -1374,10 +1394,11 @@ namespace gameswf
 							break;
 						}
 						listeners_array->push(listener);
-						fprintf(stderr, "[ADDLIS] target=%p type='%s' key='%s' listener_isfn=%d count=%d fn=%p\n",
+						fprintf(stderr, "[ADDLIS] target=%p type='%s' key='%s' listener_isfn=%d count=%d fn=%p sprite=%d\n",
 							target, event_type_str.c_str(), event_key.c_str(),
 							listener.is_function() ? 1 : 0, listeners_array->size(),
-							listener.is_function() ? (void*)listener.to_function() : NULL);
+							listener.is_function() ? (void*)listener.to_function() : NULL,
+							cast_to<sprite_instance>(target) != NULL ? 1 : 0);
 					}
 					stack.drop(arg_count + 1);
 						break;
@@ -1549,14 +1570,22 @@ namespace gameswf
 
 					if (obj == NULL)
 					{
-						fprintf(stderr, "[CPV_NULL] '%s' args=%d meth=%s ip=%d bytes=",
-							name, arg_count, cur_meth, ip);
+						static bool s_dumped_null = false;
+						fprintf(stderr, "[CPV_NULL] '%s' args=%d meth=%s ip=%d codelen=%d locals=%d\n",
+							name, arg_count, cur_meth, ip, (int) m_code.size(), m_local_count);
+						if (s_dumped_null == false)
 						{
-							int st = ip > 24 ? ip - 24 : 0;
-							for (int k = st; k < ip; k++)
+							s_dumped_null = true;
+							fprintf(stderr, "  code:");
+							for (int k = 0; k < (int) m_code.size(); k++)
 							{
-								fprintf(stderr, "%02X ", m_code[k]);
+								if ((k % 32) == 0)
+								{
+									fprintf(stderr, "\n   %04X:", k);
+								}
+								fprintf(stderr, " %02X", m_code[k]);
 							}
+							fprintf(stderr, "\n");
 						}
 						fprintf(stderr, "| recv=%s local0=%s scope_top=%s\n",
 							recv_val.to_xstring(),
@@ -1723,7 +1752,44 @@ namespace gameswf
 							fprintf(stderr, "[FPROP] '%s' -> NULL meth=%s scopesize=%d top=%s\n",
 								name, cur_meth, scope.size(),
 								scope.size() > 0 ? scope.top(0).to_xstring() : "none");
+							for (int s = 0; s < scope.size(); s++)
+							{
+								as_object* so = scope[s].to_object();
+								as_value probe;
+								bool has = so != NULL && so->get_member(name, &probe);
+								as_value builtin_probe;
+								bool has_builtin = so != NULL && get_builtin(BUILTIN_SPRITE_METHOD, name, &builtin_probe);
+								sprite_instance* sp = so ? cast_to<sprite_instance>(so) : NULL;
+								fprintf(stderr, "    scope[%d]=%p get_member=%d isfn=%d is_sprite=%d builtin=%d\n",
+									s, (void*) so, (int) has, has ? (int) probe.is_function() : 0,
+									sp ? 1 : 0, (int) has_builtin);
+							}
 							fflush(stderr);
+						}
+
+						// The scope stack does not always carry the receiver
+						// (e.g. an unqualified stop() inside a frame script),
+						// and pushing NULL here makes the following call lose
+						// its receiver entirely -- the call then silently does
+						// nothing.  Fall back to 'this' when it owns the
+						// property, then to the global object, which is what
+						// findproperty (0x5E) already does.
+						as_object* self = lregister.size() > 0 ? lregister[0].to_object() : NULL;
+						if (self != NULL)
+						{
+							as_value probe;
+							if (self->get_member(name, &probe))
+							{
+								obj = self;
+							}
+						}
+						if (obj == NULL)
+						{
+							as_value probe;
+							if (get_global()->get_member(name, &probe))
+							{
+								obj = get_global();
+							}
 						}
 					}
 
@@ -3487,6 +3553,10 @@ namespace gameswf
 						else
 						{
 							new_object = new as_object(get_player());
+							fprintf(stderr, "[BIRTH-C] obj=%p name='%s' super_idx=%d\n",
+								(void*) new_object.get_ptr(), class_name ? class_name : "?",
+								ii ? (int) ii->m_super_name : -1);
+							fflush(stderr);
 						}
 
 						new_object->set_instance(ii);

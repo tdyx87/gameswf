@@ -96,9 +96,14 @@ namespace gameswf
 		if (fn.this_ptr)
 		{
 			this_ptr = fn.this_ptr;
-			if (this_ptr->m_this_ptr != NULL)
+
+			// m_this_ptr is a weak_ptr to the object of a constructor chain
+			// and may already be gone.  Using it without checking replaced a
+			// valid receiver with NULL and left 'this' undefined in the method.
+			as_object* chained_this = this_ptr->m_this_ptr.get_ptr();
+			if (chained_this != NULL)
 			{
-				this_ptr = this_ptr->m_this_ptr.get_ptr();
+				this_ptr = chained_this;
 			}
 		}
 

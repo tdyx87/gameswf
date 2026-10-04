@@ -142,13 +142,20 @@ namespace gameswf
 			target->set_member("scenes", as_value());
 			target->set_member("isPlaying", as_value(false));
 
-			// Methods
-			target->set_member("play", as_value());
-			target->set_member("stop", as_value());
-			target->set_member("gotoAndPlay", as_value());
-			target->set_member("gotoAndStop", as_value());
-			target->set_member("nextFrame", as_value());
-			target->set_member("prevFrame", as_value());
+			// Timeline methods are deliberately NOT defined here.
+			//
+			// They used to be set to as_value() (undefined), which put an
+			// undefined member on every movie clip.  That shadowed the real
+			// implementations registered in BUILTIN_SPRITE_METHOD
+			// (sprite_play / sprite_stop / sprite_goto_and_play / ...): a
+			// property lookup found the undefined member first and the call
+			// silently did nothing.  stop() then never stopped the timeline,
+			// so clips kept looping and their frame scripts re-ran forever.
+			//
+			// Leaving them unset lets the lookup fall through to the real
+			// character implementations.
+			//
+			// addFrameScript is handled inside the AVM2 interpreter.
 			target->set_member("addFrameScript", as_value());
 		}
 	};

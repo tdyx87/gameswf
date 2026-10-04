@@ -30,6 +30,15 @@ namespace gameswf
 	// flash9
 	exported_module void	as_object_add_event_listener(const fn_call& fn);
 
+	// AS3 event dispatch.  addEventListener() stores listeners in
+	// "__events_<event_type>" as either an array of listeners or a single
+	// listener function.  Returns true when a listener was found and called.
+	exported_module bool	avm2_dispatch_event(as_object* obj, as_environment* env, const char* event_type);
+
+	// Maps an event_id to the matching AS3 event type name (the string passed
+	// to addEventListener).  Returns NULL when there is no AS3 equivalent.
+	exported_module const char*	avm2_event_type_name(int event_id_code);
+
 	struct instance_info;
 
 	struct as_object : public as_object_interface

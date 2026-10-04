@@ -195,6 +195,12 @@ namespace gameswf
 		virtual void	stop_drag();
 		character*	clone_display_object(const tu_string& newname, int depth);
 		virtual bool	on_event(const event_id& id);
+
+		// AS3 event dispatch: call the listeners stored in
+		// "__events_<event_type>" (registered by addEventListener).
+		// Returns true when at least one listener was found and called.
+		bool	dispatch_avm2_event(const char* event_type);
+
 		virtual const char*	call_method_args(const char* method_name, const char* method_arg_fmt, va_list args);
 		virtual tu_string	call_method(const char* method_name, as_value * arguments, int argument_count );
 		virtual void	attach_display_callback(const char* path_to_object, void (*callback)(void*), void* user_ptr);

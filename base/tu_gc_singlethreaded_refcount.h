@@ -24,15 +24,23 @@
 
 namespace tu_gc {
 
-	// TEMP DIAGNOSTIC: break into a debugger when a ref-count goes bad, so
-	// the offending call-stack can be captured instead of failing later
-	// inside free().
+	// A ref-count outside the valid range means the object was already
+	// released (MSVC fills freed memory with 0xFEEEFEEE / 0xDDDDDDDD) or
+	// its count was corrupted.  Report it and let the caller skip the
+	// update, so we never write into freed memory or delete twice.
+	//
+	// This used to call __debugbreak() unconditionally, which froze the
+	// player mid-playback (no debugger attached in a normal run) -- the
+	// movie simply hung instead of continuing.  Set
+	// TU_GC_REFCOUNT_DEBUG_BREAK to get the debugger break back.
 	static inline void refcount_debug_break(const void* obj, int rc)
 	{
 #ifdef _MSC_VER
 		fprintf(stderr, "[REFBAD] obj=%p rc=%d\n", obj, rc);
 		fflush(stderr);
+#ifdef TU_GC_REFCOUNT_DEBUG_BREAK
 		__debugbreak();
+#endif
 #endif
 	}
 
@@ -201,14 +209,22 @@ namespace tu_gc {
 		// Notifications from write_barrier().
 		static void increment_ref(gc_object_collector_base* obj) {
 			assert(obj);
-			if (obj->ref_count() < 0) { refcount_debug_break(obj, obj->ref_count()); }
-			assert(obj->ref_count() >= 0);
+			if (obj->ref_count() < 0) {
+				// Object is gone / count is corrupt.  Touching m_ref_count
+				// would write into freed memory; skip instead.
+				refcount_debug_break(obj, obj->ref_count());
+				return;
+			}
 			obj->m_ref_count++;
 		}
 		static void decrement_ref(gc_object_collector_base* obj) {
 			assert(obj);
-			if (obj->ref_count() <= 0) { refcount_debug_break(obj, obj->ref_count()); }
-			assert(obj->ref_count() > 0);
+			if (obj->ref_count() <= 0) {
+				// Nothing left to drop.  Deleting here would be a double
+				// free, so just report it.
+				refcount_debug_break(obj, obj->ref_count());
+				return;
+			}
 			obj->m_ref_count--;
 			if (obj->m_ref_count == 0) {
 				delete obj;

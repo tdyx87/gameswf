@@ -706,14 +706,17 @@ namespace gameswf
 		}
 
 		{
-			static int s_diag_count = -1;
-			if (s_diag_count < 0)
+			static int s_diag_left = -1;
+			if (s_diag_left < 0)
 			{
 				const char* e = getenv("GSW_DEBUG");
-				s_diag_count = (e && *e && strcmp(e, "0") != 0) ? 1000000000 : 60;
+				s_diag_left = (e && *e && strcmp(e, "0") != 0) ? 1000000000 : 60;
 			}
-			if (s_diag_count-- > 0)
+			// NB: never post-decrement below 0 -- a negative value would look
+			// like "not initialised yet" and re-arm the cap on the next frame.
+			if (s_diag_left > 0)
 			{
+				s_diag_left--;
 				fprintf(stderr, "[DIAG] root::display() m_movie=%p visible=%d\n", m_movie.get_ptr(), m_movie->get_visible());
 			}
 		}

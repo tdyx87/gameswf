@@ -566,8 +566,10 @@ namespace gameswf
 			m_script->get(frame, &m_frame_script);
 			if (m_frame_script != NULL)
 			{
-				fprintf(stderr, "[FRAMESCRIPT] set_frame_script: frame=%d this=%p name='%s' found=%p\n",
-					frame, this, get_name().c_str(), m_frame_script.get_ptr());
+				fprintf(stderr, "[FRAMESCRIPT] set_frame_script: frame=%d this=%p id=%d name='%s' cur=%d total=%d play=%d found=%p parent=%p\n",
+					frame, this, get_id(), get_name().c_str(), m_current_frame,
+					m_def != NULL ? m_def->get_frame_count() : -1,
+					(int) m_play_state, m_frame_script.get_ptr(), (void*) get_parent());
 			}
 		}
 	}
@@ -603,6 +605,10 @@ namespace gameswf
 	// 0-based frame numbers!!  (in contrast to ActionScript and Flash MX)
 	void sprite_instance::goto_frame(int target_frame_number)
 	{
+		fprintf(stderr, "[GOTO] this=%p id=%d name='%s' target=%d cur=%d total=%d\n",
+			this, get_id(), get_name().c_str(), target_frame_number, m_current_frame,
+			m_def != NULL ? m_def->get_frame_count() : -1);
+
 		//default property is to stop on goto frame
 		m_play_state = STOP;
 
@@ -1309,6 +1315,125 @@ namespace gameswf
 		m_display_list.remove_display_object(ch);
 	}
 
+	const char*	avm2_event_type_name(int event_id_code)
+	// AS2-style event_id -> AS3 event type name (the string passed to
+	// addEventListener).  Returns NULL when there is no AS3 equivalent.
+	{
+		switch (event_id_code)
+		{
+		case event_id::ENTER_FRAME:		return "enterFrame";
+		case event_id::PRESS:			return "mouseDown";
+		case event_id::RELEASE:			return "mouseUp";
+		case event_id::RELEASE_OUTSIDE:	return "releaseOutside";
+		case event_id::ROLL_OVER:		return "rollOver";
+		case event_id::ROLL_OUT:		return "rollOut";
+		case event_id::DRAG_OVER:		return "dragOver";
+		case event_id::DRAG_OUT:		return "dragOut";
+		case event_id::MOUSE_DOWN:		return "mouseDown";
+		case event_id::MOUSE_UP:		return "mouseUp";
+		case event_id::MOUSE_MOVE:		return "mouseMove";
+		case event_id::KEY_DOWN:		return "keyDown";
+		case event_id::KEY_UP:			return "keyUp";
+		case event_id::LOAD:			return "load";
+		case event_id::UNLOAD:			return "unload";
+		case event_id::INITIALIZE:		return "initialize";
+		case event_id::CONSTRUCT:		return "construct";
+		default:						return NULL;
+		}
+	}
+
+	bool	avm2_dispatch_event(as_object* obj, as_environment* env, const char* event_type)
+	// Call the AS3 listeners registered for event_type on obj.  Shared by
+	// sprites (via sprite_instance::dispatch_avm2_event) and by any other
+	// character whose on_event() falls through to as_object::on_event(),
+	// e.g. buttons.
+	{
+		if (obj == NULL || env == NULL || event_type == NULL || event_type[0] == 0)
+		{
+			return false;
+		}
+
+		tu_string key = "__events_";
+		key += event_type;
+
+		as_value handlers;
+		if (obj->get_member(key, &handlers) == false)
+		{
+			return false;
+		}
+
+		as_array* listeners_array = NULL;
+		if (handlers.is_object())
+		{
+			listeners_array = cast_to<as_array>(handlers.to_object());
+		}
+
+		if (listeners_array == NULL && handlers.is_function() == false)
+		{
+			return false;
+		}
+
+		// Build the Event object.  Keep a strong reference across the whole
+		// dispatch: push()/drop() only borrow the reference on the VM stack,
+		// so a raw as_object* would be deleted after the first listener.
+		gc_ptr<as_object> event_obj(new as_object(obj->get_player()));
+		event_obj->set_member("type", as_value(event_type));
+		as_value event_val(event_obj.get_ptr());
+
+		if (listeners_array != NULL)
+		{
+			// Call all listeners.  Copy first: a listener may add or remove
+			// listeners while we iterate.
+			array<as_value> snapshot;
+			snapshot.resize(listeners_array->size());
+			for (int i = 0; i < listeners_array->size(); i++)
+			{
+				snapshot[i] = listeners_array->m_array[i];
+			}
+
+			bool called = false;
+			for (int i = 0; i < (int) snapshot.size(); i++)
+			{
+				as_value listener = snapshot[i];
+				if (listener.is_function())
+				{
+					env->push(event_val);
+					gameswf::call_method(listener, env, obj, 1, env->get_top_index());
+					env->drop(1);
+					called = true;
+				}
+			}
+			if (called && strcmp(event_type, "enterFrame") != 0)
+			{
+				character* ch = cast_to<character>(obj);
+				fprintf(stderr, "[AVM2EVT] obj=%p name='%s' type='%s' listeners=%d\n",
+					(void*) obj, ch != NULL ? ch->get_name().c_str() : "?",
+					event_type, (int) snapshot.size());
+			}
+			return called;
+		}
+
+		// Legacy single listener format.
+		env->push(event_val);
+		gameswf::call_method(handlers, env, obj, 1, env->get_top_index());
+		env->drop(1);
+		if (strcmp(event_type, "enterFrame") != 0)
+		{
+			character* ch = cast_to<character>(obj);
+			fprintf(stderr, "[AVM2EVT] obj=%p name='%s' type='%s' listeners=1\n",
+				(void*) obj, ch != NULL ? ch->get_name().c_str() : "?", event_type);
+		}
+		return true;
+	}
+
+	bool sprite_instance::dispatch_avm2_event(const char* event_type)
+	// AS3 event dispatch.  addEventListener() stores the listeners in
+	// "__events_<event_type>" as either an array of listeners or a single
+	// listener function.
+	{
+		return avm2_dispatch_event(this, &m_as_environment, event_type);
+	}
+
 	bool sprite_instance::on_event(const event_id& id)
 	// Dispatch event handler(s), if any.
 	{
@@ -1338,64 +1463,33 @@ namespace gameswf
 			return true;
 		}
 
-		// AVM2 event dispatch: check for __events_<eventType> member
-		if (id.m_id == event_id::ENTER_FRAME)
+		// AVM2 (AS3) event dispatch: listeners registered through
+		// addEventListener() live in "__events_<eventType>".
+		const char* avm2_type = avm2_event_type_name(id.m_id);
+		if (avm2_type != NULL)
 		{
-			as_value avm2_handlers;
-			bool found = get_member("__events_enterFrame", &avm2_handlers);
-			if (found)
+			if (dispatch_avm2_event(avm2_type))
 			{
-				fprintf(stderr, "[ENTFRAME] this=%p found=%d isobj=%d isfn=%d\n", this, (int)found,
-					avm2_handlers.is_object() ? 1 : 0, avm2_handlers.is_function() ? 1 : 0);
+				return true;
 			}
-			if (found && avm2_handlers.is_object())
+
+			// Flash fires "click" when the mouse is pressed and released on
+			// the same character.  gameswf only sends RELEASE in exactly that
+			// case (otherwise it sends RELEASE_OUTSIDE), so RELEASE doubles
+			// as the click event here.
+			if (id.m_id == event_id::RELEASE && dispatch_avm2_event("click"))
 			{
-				// Check if it's an array of listeners (new multi-listener format)
-				as_array* listeners_array = cast_to<as_array>(avm2_handlers.to_object());
-				if (listeners_array)
-				{
-					// Create a simple Event object.  Keep a strong reference
-					// across the whole dispatch: push()/drop() only borrows
-					// the reference on the VM stack, so a raw as_object*
-					// would be deleted at the end of the first iteration.
-					gc_ptr<as_object> event_obj(new as_object(get_player()));
-					event_obj->set_member("type", as_value("enterFrame"));
-					as_value event_val(event_obj.get_ptr());
+				return true;
+			}
 
-					// Call all listeners.  Copy first: a listener may add or
-					// remove listeners while we iterate.
-					array<as_value> snapshot;
-					snapshot.resize(listeners_array->size());
-					for (int i = 0; i < listeners_array->size(); i++)
-					{
-						snapshot[i] = listeners_array->m_array[i];
-					}
-					for (int i = 0; i < (int)snapshot.size(); i++)
-					{
-						as_value listener = snapshot[i];
-						if (listener.is_function())
-						{
-							m_as_environment.push(event_val);
-							gameswf::call_method(listener, &m_as_environment, this, 1, 
-								m_as_environment.get_top_index());
-							m_as_environment.drop(1);
-						}
-					}
-					return true;
-				}
-				else if (avm2_handlers.is_function())
-				{
-					// Legacy single listener format
-					gc_ptr<as_object> event_obj(new as_object(get_player()));
-					event_obj->set_member("type", as_value("enterFrame"));
-					as_value event_val(event_obj.get_ptr());
-
-					m_as_environment.push(event_val);
-					gameswf::call_method(avm2_handlers, &m_as_environment, this, 1, 
-						m_as_environment.get_top_index());
-					m_as_environment.drop(1);
-					return true;
-				}
+			// Buttons also react to rollOver/rollOut on hover.
+			if (id.m_id == event_id::ROLL_OVER && dispatch_avm2_event("mouseOver"))
+			{
+				return true;
+			}
+			if (id.m_id == event_id::ROLL_OUT && dispatch_avm2_event("mouseOut"))
+			{
+				return true;
 			}
 		}
 

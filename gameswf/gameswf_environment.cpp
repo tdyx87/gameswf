@@ -191,6 +191,34 @@ namespace gameswf
 			{
 				return val.to_object();
 			}
+
+			// find_property_owner() only walks the members and the prototype
+			// chain, so it never sees character built-ins such as
+			// MovieClip.stop()/play(), which are resolved by get_member().
+			// Without this fallback an unqualified stop() inside a frame
+			// script finds no owner: findpropstrict then pushes NULL, the call
+			// runs with no receiver and silently does nothing, so the clip
+			// never stops and keeps looping instead.
+			as_object* obj = (*this)[i].to_object();
+			if (obj != NULL)
+			{
+				as_value member;
+				if (obj->get_member(name, &member))
+				{
+					return obj;
+				}
+				// Character built-ins (MovieClip.stop()/play()/gotoAndStop()/...)
+				// are not always reachable through the normal member/prototype
+				// walk, especially for display instances whose class type wasn't
+				// recognised as a Sprite.  If 'name' is one of those builtins,
+				// resolve it on this scope object (the MovieClip 'this') so an
+				// unqualified stop()/play() works inside a frame script.
+				as_value builtin_member;
+				if (get_builtin(BUILTIN_SPRITE_METHOD, name, &builtin_member))
+				{
+					return obj;
+				}
+			}
 		}
 		return NULL;
 	}

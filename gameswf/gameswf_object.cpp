@@ -451,6 +451,43 @@ namespace gameswf
 			}
 		}
 
+		// AS3 listeners registered via addEventListener().  Buttons and other
+		// characters reach this through their own on_event() override.
+		if (called == false)
+		{
+			const char* avm2_type = avm2_event_type_name(id.m_id);
+			if (avm2_type != NULL)
+			{
+				character* mroot = get_player() != NULL ? get_player()->get_root_movie() : NULL;
+				as_environment* env = mroot != NULL ? mroot->get_environment() : NULL;
+				if (env != NULL)
+				{
+					if (avm2_dispatch_event(this, env, avm2_type))
+					{
+						called = true;
+					}
+					// Flash fires "click" when press and release happen on the
+					// same character; gameswf only sends RELEASE in that case
+					// (otherwise RELEASE_OUTSIDE), so RELEASE doubles as click.
+					else if (id.m_id == event_id::RELEASE
+						&& avm2_dispatch_event(this, env, "click"))
+					{
+						called = true;
+					}
+					else if (id.m_id == event_id::ROLL_OVER
+						&& avm2_dispatch_event(this, env, "mouseOver"))
+					{
+						called = true;
+					}
+					else if (id.m_id == event_id::ROLL_OUT
+						&& avm2_dispatch_event(this, env, "mouseOut"))
+					{
+						called = true;
+					}
+				}
+			}
+		}
+
 		return called;
 	}
 
@@ -740,6 +777,14 @@ namespace gameswf
 	void as_object::set_instance(instance_info * info)
 	{
 		m_instance = info;
+		if (info)
+		{
+			abc_def* abc = info->m_abc.get_ptr();
+			const char* cn = abc ? abc->get_multiname(info->m_name) : "?";
+			fprintf(stderr, "[SETINSTANCE] obj=%p class='%s' super_idx=%d\n", (void*) this,
+				cn ? cn : "?", (int) info->m_super_name);
+			fflush(stderr);
+		}
 	}
 
 	as_object* as_object::create_proto(const as_value& constructor)
