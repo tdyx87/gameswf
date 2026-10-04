@@ -479,6 +479,23 @@ namespace gameswf
 		return &m_init_action_list[frame_number];
 	}
 
+	void	movie_def_impl::abort_load()
+	// The load bailed out before any frame was marked loaded (bad header,
+	// unsupported/failed decompression, ...).  Publish one empty frame and
+	// wake any waiter: with m_frame_count/m_loading_frame still at 0 the
+	// per-frame arrays have no element 0 to execute and wait_frame(0) blocks
+	// forever, so the player hangs instead of reporting the broken file.
+	{
+		set_frame_count(1);
+		m_playlist.resize(get_frame_count());
+		m_init_action_list.resize(get_frame_count());
+
+		while (get_loading_frame() < get_frame_count())
+		{
+			inc_loading_frame();
+		}
+	}
+
 	void	movie_def_impl::read(tu_file* in)
 	// Read a .SWF movie.
 	{
@@ -498,6 +515,7 @@ namespace gameswf
 			// ERROR
 			log_error("gameswf::movie_def_impl::read() -- file does not start with a SWF header!\n");
 			fprintf(stderr, "error: invalid SWF header (expected FWS, CWS, or ZWS)\n");
+			abort_load();
 			return;
 		}
 		bool	compressed = (header & 255) == 'C';
@@ -510,6 +528,7 @@ namespace gameswf
 		{
 #if TU_CONFIG_LINK_TO_ZLIB == 0
 			log_error("movie_def_impl::read(): unable to read zipped SWF data; TU_CONFIG_LINK_TO_ZLIB is 0\n");
+			abort_load();
 			return;
 #endif
 
@@ -548,6 +567,7 @@ namespace gameswf
 			{
 				log_error("movie_def_impl::read(): failed to decompress LZMA data\n");
 				fprintf(stderr, "error: LZMA decompression failed\n");
+				abort_load();
 				return;
 			}
 

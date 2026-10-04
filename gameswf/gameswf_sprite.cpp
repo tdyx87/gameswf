@@ -51,8 +51,13 @@ namespace gameswf
 		
 		// Initialize the flags for init action executed.
 		m_init_actions_executed.resize(m_def->get_frame_count());
-		memset(&m_init_actions_executed[0], 0,
-			sizeof(m_init_actions_executed[0]) * m_init_actions_executed.size());
+		if (m_init_actions_executed.size() > 0)
+		{
+			// NB: &v[0] on an empty array is out of bounds; a movie_def that
+			// failed to load reports 0 frames until abort_load() publishes one.
+			memset(&m_init_actions_executed[0], 0,
+				sizeof(m_init_actions_executed[0]) * m_init_actions_executed.size());
+		}
 
 		m_player->set_alive(this);
 		set_ctor(as_global_movieclip_ctor);

@@ -403,6 +403,7 @@ namespace gameswf
 
 		virtual const array<execute_tag*>*	get_init_actions(int frame_number);
 		void	read(tu_file* in);
+		void	abort_load();
 		void	read_tags();
 		void	get_owned_fonts(array<font*>* fonts);
 
