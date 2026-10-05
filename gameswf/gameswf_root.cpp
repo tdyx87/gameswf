@@ -653,8 +653,14 @@ namespace gameswf
 						{
 							fprintf(stderr, "AVM2: Running script init...\n");
 							as_environment env(m_player.get_ptr());
-							gameswf::call_method(script_func, 
-								&env, as_value(m_movie.get_ptr()), 0, 0);
+							// Script init runs with the global object as its
+							// 'this' (ECMA-262: [[Scope]] of a script starts
+							// with the global).  Passing the root movie here
+							// made the prologue `getlocal_0; pushscope` place
+							// the movie where the script expects _global --
+							// unqualified global lookups then saw root members.
+							gameswf::call_method(script_func,
+								&env, as_value(m_player->get_global()), 0, 0);
 							fprintf(stderr, "AVM2: Script init done\n");
 						}
 					}

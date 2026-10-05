@@ -331,6 +331,11 @@ int	main(int argc, char *argv[])
 		bool	sdl_abort = true;
 		bool	sdl_cursor = true;
 		bool	auto_click_scan = false;
+		// -clk: scheduled clicks (repeatable); each is one press/release
+		// pair at movie coordinates on a given loop frame.
+		struct scheduled_click_t { int frame, x, y; };
+		scheduled_click_t	auto_clicks[8];
+		int	auto_click_count = 0;
 		float	tex_lod_bias;
 		bool	force_realtime_framerate = false;
 
@@ -362,6 +367,30 @@ int	main(int argc, char *argv[])
 				auto_click_scan = true;
 				// Headless: no window/GL needed, just advance the timeline.
 				do_render = false;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-clk") == 0)
+			{
+				// Test hook: one press/release at movie coordinates (x,y) on
+				// loop frame <n>.  Rendering stays on, so the FBDUMP captures
+				// show what the click actually did (e.g. Play -> game screen).
+				// Usage: -clk <frame> <x> <y>  (repeatable, clicks in order)
+				if (arg + 3 >= argc)
+				{
+					fprintf(stderr, "-clk needs three args: <frame> <x> <y>\n");
+					exit(1);
+				}
+				if (auto_click_count >= 8)
+				{
+					fprintf(stderr, "-clk: too many clicks (max 8)\n");
+					exit(1);
+				}
+				auto_clicks[auto_click_count].frame = atoi(argv[arg + 1]);
+				auto_clicks[auto_click_count].x = atoi(argv[arg + 2]);
+				auto_clicks[auto_click_count].y = atoi(argv[arg + 3]);
+				auto_click_count++;
+				arg += 3;
 				continue;
 			}
 
@@ -1165,6 +1194,46 @@ int	main(int argc, char *argv[])
 							mouse_buttons = 0;
 							break;
 						}
+					}
+				}
+			}
+
+			// Test hook (-clk): move to the target point, press on the given
+			// loop frame and release two frames later, so root::on_mouse_event
+			// sees a real press -> release on the same character (which is what
+			// turns into an AS3 "click").  Multiple -clk options run in order.
+			if (auto_click_count > 0)
+			{
+				static int s_click_frame = 0;
+				s_click_frame++;
+
+				for (int ci = 0; ci < auto_click_count; ci++)
+				{
+					const scheduled_click_t& c = auto_clicks[ci];
+
+					// Hover a few frames before pressing.  root::generate_mouse_button_events
+					// only records m_active_entity while the button is UP (ROLL_OVER), so a
+					// press on the very frame the cursor arrives would see active==NULL and
+					// neither PRESS nor RELEASE would ever reach the character.
+					if (s_click_frame >= c.frame - 4 && s_click_frame <= c.frame + 2)
+					{
+						mouse_x = c.x;
+						mouse_y = c.y;
+					}
+
+					if (s_click_frame == c.frame)
+					{
+						mouse_buttons = 1;
+						fprintf(stderr, "[CLK] press at %d,%d loop_frame=%d\n",
+							mouse_x, mouse_y, s_click_frame);
+						fflush(stderr);
+					}
+					else if (s_click_frame == c.frame + 2)
+					{
+						mouse_buttons = 0;
+						fprintf(stderr, "[CLK] release at %d,%d loop_frame=%d\n",
+							mouse_x, mouse_y, s_click_frame);
+						fflush(stderr);
 					}
 				}
 			}

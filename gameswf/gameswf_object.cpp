@@ -777,14 +777,6 @@ namespace gameswf
 	void as_object::set_instance(instance_info * info)
 	{
 		m_instance = info;
-		if (info)
-		{
-			abc_def* abc = info->m_abc.get_ptr();
-			const char* cn = abc ? abc->get_multiname(info->m_name) : "?";
-			fprintf(stderr, "[SETINSTANCE] obj=%p class='%s' super_idx=%d\n", (void*) this,
-				cn ? cn : "?", (int) info->m_super_name);
-			fflush(stderr);
-		}
 	}
 
 	as_object* as_object::create_proto(const as_value& constructor)

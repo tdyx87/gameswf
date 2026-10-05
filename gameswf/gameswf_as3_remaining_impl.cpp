@@ -5,6 +5,11 @@
 
 #include "gameswf/gameswf_as3_classes.h"
 #include "gameswf/gameswf_as_classes/as_array.h"
+#include "gameswf/gameswf_abc.h"
+#include "gameswf/gameswf_root.h"
+#include "gameswf/gameswf_movie_def.h"
+#include "gameswf/gameswf_environment.h"
+#include "gameswf/gameswf_action.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -620,10 +625,24 @@ static void font_hasGlyphs(const fn_call& fn)
 // ApplicationDomain implementation
 // ========================================================================
 
+static void applicationdomain_getDefinition(const fn_call& fn);
+static void applicationdomain_hasDefinition(const fn_call& fn);
+
+// currentDomain()/new ApplicationDomain() hand out plain objects; the
+// domain API lives on these instances in AS3 (it is not inherited from
+// ApplicationDomain.prototype), so attach the natives directly, otherwise
+// every hasDefinition/getDefinition call on them is a member miss.
+static void applicationdomain_attach_natives(as_object* domain)
+{
+	domain->builtin_member("getDefinition", as_value(applicationdomain_getDefinition));
+	domain->builtin_member("hasDefinition", as_value(applicationdomain_hasDefinition));
+}
+
 static void applicationdomain_get_currentDomain(const fn_call& fn)
 {
 	gc_ptr<as_object> domain = new as_object(fn.get_player());
 	domain->set_member("parentDomain", as_value());
+	applicationdomain_attach_natives(domain.get_ptr());
 	fn.result->set_as_object(domain.get_ptr());
 }
 
@@ -634,7 +653,77 @@ static void applicationdomain_constructor(const fn_call& fn)
 	{
 		domain->set_member("parentDomain", fn.arg(0));
 	}
+	applicationdomain_attach_natives(domain.get_ptr());
 	fn.result->set_as_object(domain.get_ptr());
+}
+
+// ApplicationDomain.hasDefinition/getDefinition resolve names against the
+// player global object, but ABC script traits are initialised lazily: the
+// first getlex/findpropstrict reference runs that script's init, which
+// defines its classes on the global object. The native domain API has no
+// such hook, so a class that nothing has getlex'ed yet (e.g. the library
+// class 'BgMusic') would look undefined. Force-run the pending script's
+// init on demand, mirroring the lazy path in gameswf_avm2.cpp (getlex).
+// Returns true if a definition became (or already was) available; on
+// success *resolved receives the key it is stored under (the engine
+// resolves pool multinames by short name, so a dotted query name maps to
+// the bare class trait).
+static bool applicationdomain_ensure_definition(player* p, const tu_string& name, tu_string* resolved)
+{
+	if (p == NULL || p->get_global() == NULL)
+	{
+		return false;
+	}
+	as_value val;
+	if (p->get_global()->get_member(name, &val))
+	{
+		if (resolved != NULL) *resolved = name;
+		return true;
+	}
+
+	root* r = p->get_root();
+	if (r == NULL || r->m_def == NULL)
+	{
+		return false;
+	}
+	const abc_def* adef = r->m_def->get_abc();
+	if (adef == NULL)
+	{
+		return false;
+	}
+
+	// The engine stores namespaced classes under their short name; a query
+	// like 'com.pkg.ClassName' maps to the 'ClassName' script trait.
+	const char* s = name.c_str();
+	const char* dot = strrchr(s, '.');
+	const char* trait = (dot != NULL) ? dot + 1 : s;
+
+	script_info* si = const_cast<abc_def*>(adef)->get_pending_script_by_trait(trait);
+	if (si == NULL)
+	{
+		return false;
+	}
+	as_function* init = adef->get_method(si->m_init);
+	if (init == NULL)
+	{
+		return false;
+	}
+	si->m_executed = true;
+	as_environment env(p);
+	call_method(init, &env, p->get_global(), 0, 0);
+
+	tu_string short_name = trait;
+	if (p->get_global()->get_member(short_name, &val))
+	{
+		if (resolved != NULL) *resolved = short_name;
+		return true;
+	}
+	if (p->get_global()->get_member(name, &val))
+	{
+		if (resolved != NULL) *resolved = name;
+		return true;
+	}
+	return false;
 }
 
 static void applicationdomain_getDefinition(const fn_call& fn)
@@ -644,9 +733,11 @@ static void applicationdomain_getDefinition(const fn_call& fn)
 		fn.result->set_undefined();
 		return;
 	}
-	// Try to get from global
+	tu_string name = fn.arg(0).to_string();
+	tu_string resolved = name;
+	applicationdomain_ensure_definition(fn.get_player(), name, &resolved);
 	as_value val;
-	fn.get_player()->get_global()->get_member(fn.arg(0).to_string(), &val);
+	fn.get_player()->get_global()->get_member(resolved, &val);
 	*fn.result = val;
 }
 
@@ -657,9 +748,8 @@ static void applicationdomain_hasDefinition(const fn_call& fn)
 		fn.result->set_bool(false);
 		return;
 	}
-	as_value val;
-	bool has = fn.get_player()->get_global()->get_member(fn.arg(0).to_string(), &val);
-	fn.result->set_bool(has);
+	tu_string name = fn.arg(0).to_string();
+	fn.result->set_bool(applicationdomain_ensure_definition(fn.get_player(), name, NULL));
 }
 
 // ========================================================================
@@ -923,7 +1013,17 @@ void as3_register_remaining_classes(player* player)
 
 		as_object* ad_class = new as_object(player);
 		ad_class->set_member("prototype", as_value(ad_proto.get_ptr()));
-		ad_class->builtin_member("currentDomain", as_value(applicationdomain_get_currentDomain));
+		// ApplicationDomain.currentDomain is a static PROPERTY in AS3:
+		// getproperty must yield the domain INSTANCE (bytecode uses
+		// getproperty, never callproperty), so publish the shared domain
+		// object directly instead of a factory function.  The instance
+		// carries its own hasDefinition/getDefinition natives.
+		{
+			gc_ptr<as_object> cur_domain = new as_object(player);
+			cur_domain->set_member("parentDomain", as_value());
+			applicationdomain_attach_natives(cur_domain.get_ptr());
+			ad_class->set_member("currentDomain", as_value(cur_domain.get_ptr()));
+		}
 		global->set_member("ApplicationDomain", as_value(ad_class));
 		if (system_pkg) system_pkg->set_member("ApplicationDomain", as_value(ad_class));
 	}

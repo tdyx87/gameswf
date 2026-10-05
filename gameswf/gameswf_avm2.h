@@ -140,7 +140,15 @@ namespace gameswf
 		array<gc_ptr<traits_info> > m_trait;
 		jit_function m_compiled_code;
 
+		// [[Scope]] captured by newfunction: the scope chain that was live
+		// when this closure was created.  Pushed back on the scope stack on
+		// every invocation so that name lookups (getlex/findproperty) inside
+		// the closure still see the enclosing activation, e.g. the `handler`
+		// slot of FrameUtils.frameHandler().
+		array<as_value> m_captured_scope;
+
 		as_3_function(abc_def* abc, int method, player* player);
+		as_3_function(const as_3_function& other);
 		~as_3_function();
 
 		// Dispatch.

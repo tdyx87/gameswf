@@ -70,6 +70,7 @@ namespace gameswf
 	void sprite_remove_child(const fn_call& fn);
 	void sprite_remove_child_at(const fn_call& fn);
 	void sprite_get_child_at(const fn_call& fn);
+	void sprite_get_child_by_name(const fn_call& fn);
 	void sprite_get_child_index(const fn_call& fn);
 	void sprite_get_num_children(const fn_call& fn);
 	void sprite_contains(const fn_call& fn);

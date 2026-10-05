@@ -20,6 +20,18 @@
 #include "gameswf/gameswf_as_classes/as_string.h"
 #include "gameswf/gameswf_as_classes/as_array.h"
 
+// Timeline / event diagnostics used while debugging SWF playback.
+// Very verbose: keep compiled out unless actively debugging.
+#ifndef SPRITE_TRACE_ENABLED
+#define SPRITE_TRACE_ENABLED 1
+#endif
+
+#if SPRITE_TRACE_ENABLED
+#define SPRITE_TRACE_FPRINTF(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define SPRITE_TRACE_FPRINTF(...)
+#endif
+
 namespace gameswf
 {
 
@@ -388,9 +400,16 @@ namespace gameswf
 		}
 		const bool diag = (s_diag_all != 0) || (s_diag_count++ < 400);
 
+		if (get_id() == -1)
+		{
+			fprintf(stderr, "[RFR] execute_frame_tags frame=%d state_only=%d dlist_size=%d this=%p cur=%d\n",
+				frame, state_only, m_display_list.size(), this, m_current_frame);
+			fflush(stderr);
+		}
+
 		if (diag)
 		{
-			fprintf(stderr, "[DIAG] execute_frame_tags: frame=%d state_only=%d dlist_size=%d this=%p(%s)\n", frame, state_only, m_display_list.size(), this, get_name().c_str());
+			SPRITE_TRACE_FPRINTF( "[DIAG] execute_frame_tags: frame=%d state_only=%d dlist_size=%d this=%p(%s)\n", frame, state_only, m_display_list.size(), this, get_name().c_str());
 		}
 		IF_VERBOSE_ACTION(log_msg("AVM2: execute_frame_tags frame=%d state_only=%d dlist_size=%d\n", frame, state_only, m_display_list.size()));
 		// Keep this (particularly m_as_environment) alive during execution!
@@ -423,7 +442,7 @@ namespace gameswf
 		const array<execute_tag*>&	playlist = m_def->get_playlist(frame);
 		if (diag)
 		{
-			fprintf(stderr, "[DIAG] execute_frame_tags: playlist size=%d for frame=%d, state_only=%d this=%p(%s)\n", playlist.size(), frame, state_only, this, get_name().c_str());
+			SPRITE_TRACE_FPRINTF( "[DIAG] execute_frame_tags: playlist size=%d for frame=%d, state_only=%d this=%p(%s)\n", playlist.size(), frame, state_only, this, get_name().c_str());
 		}
 		for (int i = 0; i < playlist.size(); i++)
 		{
@@ -437,24 +456,24 @@ namespace gameswf
 			{
 				if (diag)
 				{
-					fprintf(stderr, "[DIAG]   executing tag[%d] on this=%p(%s)\n", i, this, get_name().c_str());
+					SPRITE_TRACE_FPRINTF( "[DIAG]   executing tag[%d] on this=%p(%s)\n", i, this, get_name().c_str());
 				}
 				e->execute(this);
 				if (diag)
 				{
-					fprintf(stderr, "[DIAG]   after tag[%d] dlist_size=%d\n", i, m_display_list.size());
+					SPRITE_TRACE_FPRINTF( "[DIAG]   after tag[%d] dlist_size=%d\n", i, m_display_list.size());
 				}
 			}
 		}
 		if (diag)
 		{
-			fprintf(stderr, "[DIAG] execute_frame_tags: AFTER tags dlist_size=%d this=%p(%s)\n", m_display_list.size(), this, get_name().c_str());
+			SPRITE_TRACE_FPRINTF( "[DIAG] execute_frame_tags: AFTER tags dlist_size=%d this=%p(%s)\n", m_display_list.size(), this, get_name().c_str());
 			if (m_display_list.size() > 0 && m_display_list.size() <= 60) {
 				for (int j = 0; j < m_display_list.size(); j++) {
 					character* ch = m_display_list.get_character(j);
 					if (ch) {
 						sprite_instance* sp = cast_to<sprite_instance>(ch);
-						fprintf(stderr, "  [%d] depth=%d name='%s' id=%d vis=%d %s\n",
+						SPRITE_TRACE_FPRINTF( "  [%d] depth=%d name='%s' id=%d vis=%d %s\n",
 							j, ch->get_depth(), ch->get_name().c_str(), ch->get_id(),
 							ch->get_visible(),
 							(sp ? "SPRITE" : "SHAPE/OTHER"));
@@ -557,7 +576,7 @@ namespace gameswf
 		if (m_frame_script != NULL)
 		{
 			// run frame script once per frame
-			fprintf(stderr, "[FRAMESCRIPT] RUN frame=%d this=%p name='%s'\n", m_current_frame, this, get_name().c_str());
+			SPRITE_TRACE_FPRINTF( "[FRAMESCRIPT] RUN frame=%d this=%p name='%s'\n", m_current_frame, this, get_name().c_str());
 			gameswf::call_method(m_frame_script.get_ptr(), &m_as_environment, this, 0, 0);
 			m_frame_script = NULL;
 		}
@@ -571,7 +590,7 @@ namespace gameswf
 			m_script->get(frame, &m_frame_script);
 			if (m_frame_script != NULL)
 			{
-				fprintf(stderr, "[FRAMESCRIPT] set_frame_script: frame=%d this=%p id=%d name='%s' cur=%d total=%d play=%d found=%p parent=%p\n",
+				SPRITE_TRACE_FPRINTF( "[FRAMESCRIPT] set_frame_script: frame=%d this=%p id=%d name='%s' cur=%d total=%d play=%d found=%p parent=%p\n",
 					frame, this, get_id(), get_name().c_str(), m_current_frame,
 					m_def != NULL ? m_def->get_frame_count() : -1,
 					(int) m_play_state, m_frame_script.get_ptr(), (void*) get_parent());
@@ -610,7 +629,7 @@ namespace gameswf
 	// 0-based frame numbers!!  (in contrast to ActionScript and Flash MX)
 	void sprite_instance::goto_frame(int target_frame_number)
 	{
-		fprintf(stderr, "[GOTO] this=%p id=%d name='%s' target=%d cur=%d total=%d\n",
+		SPRITE_TRACE_FPRINTF( "[GOTO] this=%p id=%d name='%s' target=%d cur=%d total=%d\n",
 			this, get_id(), get_name().c_str(), target_frame_number, m_current_frame,
 			m_def != NULL ? m_def->get_frame_count() : -1);
 
@@ -691,6 +710,28 @@ namespace gameswf
 		{
 			// We're invisible, so don't display!
 			return;
+		}
+
+		{
+			// TEMP diagnostic: dump the root's display list every 30 frames.
+			static int s_dl_n = 0;
+			if (get_id() == -1 && (s_dl_n++ % 30) == 0)
+			{
+				fprintf(stderr, "[DLIST] root this=%p frame=%d play=%d size=%d:",
+					this, m_current_frame, (int) m_play_state, m_display_list.size());
+				for (int i = 0; i < m_display_list.size(); i++)
+				{
+					character* c = m_display_list.get_character(i);
+					if (c != NULL)
+					{
+						fprintf(stderr, " [d%d id%d '%s' v%d]",
+							c->get_depth(), c->get_id(),
+							c->get_name().c_str(), c->get_visible());
+					}
+				}
+				fprintf(stderr, "\n");
+				fflush(stderr);
+			}
 		}
 
 		// force advance just loaded (by loadMovie(...)) movie
@@ -1411,7 +1452,7 @@ namespace gameswf
 			if (called && strcmp(event_type, "enterFrame") != 0)
 			{
 				character* ch = cast_to<character>(obj);
-				fprintf(stderr, "[AVM2EVT] obj=%p name='%s' type='%s' listeners=%d\n",
+				SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=%d\n",
 					(void*) obj, ch != NULL ? ch->get_name().c_str() : "?",
 					event_type, (int) snapshot.size());
 			}
@@ -1425,7 +1466,7 @@ namespace gameswf
 		if (strcmp(event_type, "enterFrame") != 0)
 		{
 			character* ch = cast_to<character>(obj);
-			fprintf(stderr, "[AVM2EVT] obj=%p name='%s' type='%s' listeners=1\n",
+			SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=1\n",
 				(void*) obj, ch != NULL ? ch->get_name().c_str() : "?", event_type);
 		}
 		return true;
@@ -1891,19 +1932,19 @@ namespace gameswf
 	// AVM2 display list methods
 	character* sprite_instance::avm2_add_child(character* child)
 	{
-		fprintf(stderr, "[DIAG] avm2_add_child: child=%p, this=%p (%s)\n", child, this, get_name().c_str());
+		SPRITE_TRACE_FPRINTF( "[DIAG] avm2_add_child: child=%p, this=%p (%s)\n", child, this, get_name().c_str());
 		if (child == NULL)
 		{
 			log_error("avm2_add_child: child is NULL\n");
 			return NULL;
 		}
-		fprintf(stderr, "[DIAG]   child name='%s', id=%d\n", child->get_name().c_str(), child->get_id());
+		SPRITE_TRACE_FPRINTF( "[DIAG]   child name='%s', id=%d\n", child->get_name().c_str(), child->get_id());
 
 		// Check if already a child of this container
 		if (child->get_parent() == this)
 		{
 			// Already in this container, just return it
-			fprintf(stderr, "[DIAG]   already child, returning\n");
+			SPRITE_TRACE_FPRINTF( "[DIAG]   already child, returning\n");
 			return child;
 		}
 
@@ -1930,7 +1971,7 @@ namespace gameswf
 		m_display_list.add_display_object(child, depth, true,
 			color_transform, mat, 0.0f, 0, 0);
 
-		fprintf(stderr, "[DIAG]   added at depth=%d, dlist_size=%d\n", depth, m_display_list.size());
+		SPRITE_TRACE_FPRINTF( "[DIAG]   added at depth=%d, dlist_size=%d\n", depth, m_display_list.size());
 		return child;
 	}
 

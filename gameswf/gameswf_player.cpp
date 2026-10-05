@@ -231,6 +231,7 @@ namespace gameswf
 		map->add("removeChild", sprite_remove_child);
 		map->add("removeChildAt", sprite_remove_child_at);
 		map->add("getChildAt", sprite_get_child_at);
+		map->add("getChildByName", sprite_get_child_by_name);
 		map->add("getChildIndex", sprite_get_child_index);
 		map->add("numChildren", sprite_get_num_children);
 		map->add("contains", sprite_contains);

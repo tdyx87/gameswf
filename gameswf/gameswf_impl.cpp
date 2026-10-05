@@ -139,11 +139,6 @@ namespace gameswf
 			m_registered_class_constructor = symbol_class_ctor;
 		}
 
-		fprintf(stderr, "[SYMBOLCLASS] instanciate_registered_class: ch=%p ch_id=%d name='%s' is_sprite=%d ctor=%p\n",
-			(void*) ch, ch->get_id(), ch->get_name().c_str(),
-			(cast_to<sprite_instance>(ch) != NULL) ? 1 : 0,
-			m_registered_class_constructor.get_ptr());
-
 		if (m_registered_class_constructor != NULL)
 		{
 			// as far as I remember

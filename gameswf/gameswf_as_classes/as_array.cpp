@@ -77,6 +77,42 @@ namespace gameswf
 		}
 	}
 
+	// public indexOf(searchElement, [fromIndex:int]) : int
+	// Returns the index of the first occurrence of searchElement, or -1.
+	void	as_array_indexof(const fn_call& fn)
+	{
+		as_array* a = cast_to<as_array>(fn.this_ptr);
+		if (a == NULL)
+		{
+			fn.result->set_int(-1);
+			return;
+		}
+		int n = a->size();
+		int from = 0;
+		if (fn.nargs >= 2)
+		{
+			from = fn.arg(1).to_int();
+			if (from < 0)
+			{
+				from = n + from;
+			}
+			if (from < 0)
+			{
+				from = 0;
+			}
+		}
+		int result = -1;
+		for (int i = from; i < n; i++)
+		{
+			if (a->m_array[i] == fn.arg(0))
+			{
+				result = i;
+				break;
+			}
+		}
+		fn.result->set_int(result);
+	}
+
 
 	// public splice(startIndex:Number, [deleteCount:Number], [value:Object]) : Array
 	// adds elements to and removes elements from an array.
@@ -368,6 +404,7 @@ namespace gameswf
 		builtin_member("shift", as_array_shift);
 		builtin_member("toString", as_array_tostring);
 		builtin_member("push", as_array_push);
+	builtin_member("indexOf", as_array_indexof);
 		builtin_member("pop", as_array_pop);
 		builtin_member("length", as_value(as_array_length, as_value()));
 		builtin_member("splice", as_array_splice);

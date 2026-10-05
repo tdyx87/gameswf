@@ -121,12 +121,20 @@ namespace gameswf
 	void	sprite_play(const fn_call& fn)
 	{
 		sprite_instance* sprite = sprite_getptr(fn);
+		fprintf(stderr, "[SP] play this=%p id=%d name='%s'\n",
+			(void*) sprite, sprite != NULL ? sprite->get_id() : -999,
+			sprite != NULL ? sprite->get_name().c_str() : "-");
+		fflush(stderr);
 		sprite->set_play_state(character::PLAY);
 	}
 
 	void	sprite_stop(const fn_call& fn)
 	{
 		sprite_instance* sprite = sprite_getptr(fn);
+		fprintf(stderr, "[SP] stop this=%p id=%d name='%s'\n",
+			(void*) sprite, sprite != NULL ? sprite->get_id() : -999,
+			sprite != NULL ? sprite->get_name().c_str() : "-");
+		fflush(stderr);
 		sprite->set_play_state(character::STOP);
 	}
 
@@ -599,17 +607,11 @@ namespace gameswf
 			{
 				int frame = fn.arg(i).to_int();
 				as_function* func = fn.arg(i + 1).to_function();
-				fprintf(stderr, "[FRAMESCRIPT] addFrameScript: sprite=%p name='%s' frame=%d func=%p nargs=%d\n",
-					sprite, sprite ? sprite->get_name().c_str() : "", frame, func, fn.nargs);
-				fflush(stderr);
 				sprite->add_script(frame, func);
 			}
 		}
 		else
 		{
-			fprintf(stderr, "[FRAMESCRIPT] addFrameScript: sprite=%p name='%s' nargs=%d\n",
-				sprite, sprite ? sprite->get_name().c_str() : "", fn.nargs);
-			fflush(stderr);
 		}
 	}
 
@@ -755,6 +757,26 @@ namespace gameswf
 		character* child = cast_to<character>(fn.arg(0).to_object());
 		if (child == NULL) { fn.result->set_int(-1); return; }
 		fn.result->set_int(sprite->avm2_get_child_index(child));
+	}
+
+	// AS3 DisplayObjectContainer.getChildByName(name):DisplayObject.
+	// GameMain.readyGame() uses it to grab the 'main' stage clip; without it
+	// the lookup misses and the game controller never receives the stage, so
+	// the game screen stays on its menu frame.
+	void	sprite_get_child_by_name(const fn_call& fn)
+	{
+		sprite_instance* sprite = sprite_getptr(fn);
+		if (fn.nargs < 1) { fn.result->set_undefined(); return; }
+		tu_string name = fn.arg(0).to_string();
+		character* child = sprite->m_display_list.get_character_by_name(name);
+		if (child)
+		{
+			fn.result->set_as_object(child);
+		}
+		else
+		{
+			fn.result->set_undefined();
+		}
 	}
 
 	void	sprite_get_num_children(const fn_call& fn)
