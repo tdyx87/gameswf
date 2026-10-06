@@ -54,6 +54,11 @@ namespace gameswf
 		// and never triggers find_property's trait search.
 		exported_module virtual bool	get_member( const tu_stringi & name, as_value * val );
 
+		// Static getters (Trait_Getter in class_info traits) live beside the
+		// instance/prototype search so property reads on class objects also
+		// resolve to the getter's value.
+		exported_module virtual bool	is_getter_trait(const char* name) const;
+
 	private:
 
 		gc_ptr<class_info> m_class;

@@ -836,42 +836,46 @@ namespace gameswf
 						Uint8 vkind = ti->trait_slot.m_vkind;
 						if (vindex > 0)
 						{
-							// AVM2 spec vkind values for trait default values:
-							// 0x00=undefined, 0x01=void, 0x02=null, 0x03=true,
-							// 0x04=false, 0x05=int, 0x06=uint, 0x07=double,
-							// 0x08=string, 0x09=namespace, 0x0E=QName
+							// AVM2 spec vkind values for trait default values
+							// (AVM2 Overview, option_detail/traits_info constant kinds):
+							// 0x00=undefined, 0x01=utf8(string), 0x03=int, 0x04=uint,
+							// 0x06=double, 0x08=namespace, 0x0A=false, 0x0B=true,
+							// 0x0C=null
 							switch (vkind)
 							{
 								case 0x00: // undefined
-								case 0x01: // void (same as undefined)
 									val.set_undefined();
 									break;
-								case 0x02: // null
-									val.set_null();
-									break;
-								case 0x03: // boolean true
-									val.set_bool(true);
-									break;
-								case 0x04: // boolean false
-									val.set_bool(false);
-									break;
-								case 0x05: // integer
-									val.set_int(m_abc->get_integer(vindex));
-									break;
-								case 0x06: // unsigned integer
-									val.set_int(m_abc->get_integer(vindex));
-									break;
-								case 0x07: // double
-									val.set_double(m_abc->get_double(vindex));
-									break;
-								case 0x08: // string
+								case 0x01: // string
 									val.set_string(m_abc->get_string(vindex));
 									break;
-								case 0x09: // namespace
+								case 0x03: // signed integer
+									val.set_int(m_abc->get_integer(vindex));
+									break;
+								case 0x04: // unsigned integer
+									if (vindex < (int)m_abc->m_uinteger.size())
+									{
+										val.set_int((int)m_abc->m_uinteger[vindex]);
+									}
+									else
+									{
+										val.set_int(0);
+									}
+									break;
+								case 0x06: // double
+									val.set_double(m_abc->get_double(vindex));
+									break;
+								case 0x08: // namespace
 									val.set_undefined();
 									break;
-								case 0x0E: // QName
-									val.set_undefined();
+								case 0x0A: // false
+									val.set_bool(false);
+									break;
+								case 0x0B: // true
+									val.set_bool(true);
+									break;
+								case 0x0C: // null
+									val.set_null();
 									break;
 								default:
 									IF_VERBOSE_PARSE(log_msg("WARNING: unknown vkind 0x%02X for trait default value, ignoring\n", vkind));

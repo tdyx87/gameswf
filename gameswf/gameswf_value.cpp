@@ -16,9 +16,44 @@
 #include "gameswf/gameswf_as_classes/as_boolean.h"
 #include "gameswf/gameswf_as_classes/as_string.h"
 #include <float.h>
+#include <math.h>
 
 namespace gameswf
 {
+	// ECMA-262 ToInt32 abstract operation.
+	static int	to_int32(double d)
+	{
+		// NaN, +-Infinity (and anything outside the finite range) -> 0.
+		// Comparisons with NaN are false, so this also catches NaN.
+		if (!(d > -1.0e300 && d < 1.0e300))
+		{
+			return 0;
+		}
+		// Truncate toward zero, then reduce modulo 2^32.
+		double n = (d >= 0.0) ? floor(d) : -floor(-d);
+		n = fmod(n, 4294967296.0);
+		if (n < 0.0)
+		{
+			n += 4294967296.0;
+		}
+		if (n >= 2147483648.0)
+		{
+			return (int)(n - 4294967296.0);
+		}
+		return (int)n;
+	}
+
+	int	as_value::to_int() const
+	{
+		return to_int32(to_number());
+	}
+
+	Uint32	as_value::to_uint() const
+	{
+		// ToUint32 is the same bit pattern as ToInt32.
+		return (Uint32)to_int32(to_number());
+	}
+
 
 	bool string_to_number(int* result, const char* str, int base)
 	// Utility.  Try to convert str to a number.  If successful,

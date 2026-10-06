@@ -375,6 +375,48 @@ namespace gameswf
 		return false;
 	}
 
+	bool	as_object::is_getter_trait(const char* name) const
+	{
+		if (name == NULL)
+		{
+			return false;
+		}
+		for (const as_object* p = this; p != NULL; p = p->get_proto())
+		{
+			instance_info* ii = p->m_instance.get_ptr();
+			if (ii == NULL)
+			{
+				continue;
+			}
+			bool named = false;
+			for (int i = 0; i < ii->m_trait.size(); i++)
+			{
+				traits_info* ti = ii->m_trait[i].get();
+				if (ti == NULL)
+				{
+					continue;
+				}
+				const char* tn = ii->m_abc != NULL ? ii->m_abc->get_multiname(ti->m_name) : NULL;
+				if (tn == NULL || strcmp(tn, name) != 0)
+				{
+					continue;
+				}
+				named = true;
+				if (ti->m_kind == traits_info::Trait_Getter)
+				{
+					return true;
+				}
+			}
+			if (named)
+			{
+				// This level declares the name but not as a getter; AS3
+				// gives the first declaration precedence, so stop here.
+				return false;
+			}
+		}
+		return false;
+	}
+
 	void	as_object::clear_refs(hash<as_object*, bool>* visited_objects, as_object* this_ptr)
 	{
 		// Is it a reentrance ?

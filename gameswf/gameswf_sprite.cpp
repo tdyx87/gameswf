@@ -577,7 +577,14 @@ namespace gameswf
 		{
 			// run frame script once per frame
 			SPRITE_TRACE_FPRINTF( "[FRAMESCRIPT] RUN frame=%d this=%p name='%s'\n", m_current_frame, this, get_name().c_str());
-			gameswf::call_method(m_frame_script.get_ptr(), &m_as_environment, this, 0, 0);
+			// Pass no receiver: addFrameScript stores method closures that
+			// were bound when `this.method` was read (remembered in
+			// avm2_method_owners).  Passing the sprite rebinds them to the
+			// sprite -- e.g. HomeStep.endScript ran with this=stepMC and
+			// missed m_stepMC.  as_3_function::operator() falls back to the
+			// owner, then to this sprite's environment target, for plain
+			// closures.
+			gameswf::call_method(m_frame_script.get_ptr(), &m_as_environment, as_value(), 0, 0);
 			m_frame_script = NULL;
 		}
 	}

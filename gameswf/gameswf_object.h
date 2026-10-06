@@ -94,6 +94,10 @@ namespace gameswf
 		exported_module virtual bool	set_member(const tu_stringi& name, const as_value& val);
 		exported_module virtual bool	get_member(const tu_stringi& name, as_value* val);
 		exported_module virtual bool	find_property( const tu_stringi & name, as_value * val );
+		// True when `name` resolves to a Trait_Getter on obj or its prototype
+		// chain.  AVM2 property reads must invoke such traits and return the
+		// result; get_member() itself returns the raw getter function.
+		exported_module virtual bool	is_getter_trait(const char* name) const;
 		exported_module virtual bool	on_event(const event_id& id);
 		exported_module virtual	void enumerate(as_environment* env);
 		exported_module virtual as_object* get_proto() const;

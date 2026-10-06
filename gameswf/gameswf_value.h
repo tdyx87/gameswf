@@ -105,7 +105,11 @@ namespace gameswf
 		exported_module const tu_string&	to_tu_string() const;
 		exported_module const tu_stringi&	to_tu_stringi() const;
 		exported_module double	to_number() const;
-		exported_module int	to_int() const { return (int) to_number(); };
+		// ECMA-262 ToInt32/ToUint32: NaN, +-Inf and +-0 convert to 0,
+		// out-of-range values wrap modulo 2^32.  A plain (int) cast maps
+		// NaN to INT_MIN on x86, which corrupted slot values in AVM2.
+		exported_module int	to_int() const;
+		exported_module Uint32	to_uint() const;
 		exported_module float	to_float() const { return (float) to_number(); };
 		exported_module bool	to_bool() const;
 		exported_module as_function*	to_function() const;

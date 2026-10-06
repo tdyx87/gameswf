@@ -142,4 +142,37 @@ namespace gameswf
 		// get_member(), which searches class traits, then sets *val = this.
 		return as_object::find_property( name, val );
 	}
+
+	bool	as_class::is_getter_trait(const char* name) const
+	{
+		if ( as_object::is_getter_trait( name ) )
+		{
+			return true;
+		}
+
+		if ( name == NULL || m_class == NULL )
+		{
+			return false;
+		}
+
+		for ( int i = 0; i < m_class->m_trait.size(); i++ )
+		{
+			traits_info* ti = m_class->m_trait[i].get();
+			if ( ti == NULL )
+			{
+				continue;
+			}
+			const char* traits_name = m_class->m_abc != NULL
+				? m_class->m_abc->get_multiname( ti->m_name ) : NULL;
+			if ( traits_name == NULL || strcmp( traits_name, name ) != 0 )
+			{
+				continue;
+			}
+			if ( ti->m_kind == traits_info::Trait_Getter )
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 }

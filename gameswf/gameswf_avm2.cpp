@@ -185,7 +185,7 @@ namespace gameswf
 					as_value len;
 					if (arr->get_member("length", &len))
 					{
-						int n = (int)len.to_number();
+						int n = len.to_int();
 						if (n < 0) n = 0;
 						if (n > 1024) n = 1024;
 						for (int i = 0; i < n; i++)
@@ -266,6 +266,32 @@ namespace gameswf
 			}
 		}
 		return false;
+	}
+
+	// AS3 property reads must return a getter's VALUE.  as_object::get_member()
+	// deliberately hands back the raw Trait_Getter function (set_member() and
+	// find_property() depend on that raw form), so the invocation happens here
+	// on the read paths.  `obj` is the object the property was read from and
+	// becomes the getter's `this`.
+	static void avm2_resolve_getter(as_object* obj, const char* name, as_value* val)
+	{
+		if (obj == NULL || name == NULL || val == NULL || !val->is_function())
+		{
+			return;
+		}
+		if (obj->is_getter_trait(name) == false)
+		{
+			return;
+		}
+		as_function* getter = val->to_function();
+		if (getter == NULL)
+		{
+			return;
+		}
+		as_environment env(obj->get_player());
+		IF_VERBOSE_ACTION(log_msg("EX: getter\t %s.%s() -> ", obj->to_string(), name));
+		*val = call_method(getter, &env, obj, 0, env.get_top_index());
+		IF_VERBOSE_ACTION(log_msg("%s\n", val->to_xstring()));
 	}
 
 	// Deliver evt to every listener registered on target under "__events_<type>".
@@ -937,7 +963,7 @@ namespace gameswf
 					if (target_sprite && strcmp(name, "addChildAt") == 0 && arg_count >= 2)
 					{
 						character* child = stack.top(1).to_object() ? cast_to<character>(stack.top(1).to_object()) : NULL;
-						int idx = (int)stack.top(0).to_number();
+						int idx = stack.top(0).to_int();
 						character* result_ch = target_sprite->avm2_add_child_at(child, idx);
 						stack.drop(arg_count + 1);
 						stack.push(as_value(result_ch));
@@ -953,7 +979,7 @@ namespace gameswf
 					}
 					if (target_sprite && strcmp(name, "removeChildAt") == 0 && arg_count >= 1)
 					{
-						int idx = (int)stack.top(0).to_number();
+						int idx = stack.top(0).to_int();
 						character* result_ch = target_sprite->avm2_remove_child_at(idx);
 						stack.drop(arg_count + 1);
 						stack.push(as_value(result_ch));
@@ -961,7 +987,7 @@ namespace gameswf
 					}
 					if (target_sprite && strcmp(name, "getChildAt") == 0 && arg_count >= 1)
 					{
-						int idx = (int)stack.top(0).to_number();
+						int idx = stack.top(0).to_int();
 						character* result_ch = target_sprite->avm2_get_child_at(idx);
 						stack.drop(arg_count + 1);
 						stack.push(as_value(result_ch));
@@ -993,7 +1019,7 @@ namespace gameswf
 					if (target_sprite && strcmp(name, "setChildIndex") == 0 && arg_count >= 2)
 					{
 						character* child = stack.top(1).to_object() ? cast_to<character>(stack.top(1).to_object()) : NULL;
-						int idx = (int)stack.top(0).to_number();
+						int idx = stack.top(0).to_int();
 						target_sprite->avm2_set_child_index(child, idx);
 						stack.drop(arg_count + 1);
 						stack.push(as_value());
@@ -1010,8 +1036,8 @@ namespace gameswf
 					}
 					if (target_sprite && strcmp(name, "swapChildrenAt") == 0 && arg_count >= 2)
 					{
-						int idx1 = (int)stack.top(1).to_number();
-						int idx2 = (int)stack.top(0).to_number();
+						int idx1 = stack.top(1).to_int();
+						int idx2 = stack.top(0).to_int();
 						target_sprite->avm2_swap_children_at(idx1, idx2);
 						stack.drop(arg_count + 1);
 						stack.push(as_value());
@@ -1057,11 +1083,11 @@ namespace gameswf
 								as_value arg = env.top(0);
 								if (strcmp(name, "int") == 0)
 								{
-									arg.set_double((double)(int)arg.to_number());
+									arg.set_double((double)arg.to_int());
 								}
 								else if (strcmp(name, "uint") == 0)
 								{
-									arg.set_double((double)(Uint32)arg.to_number());
+									arg.set_double((double)arg.to_uint());
 								}
 								else if (strcmp(name, "Number") == 0)
 								{
@@ -1202,7 +1228,10 @@ namespace gameswf
 					{
 						as_object* proto = super->create_proto( function );
 						UNUSED(proto);
-						call_method( function, &env, obj.get_ptr(), arg_count, 0);
+						// first_arg_bottom_index must point at arg1 (the top
+						// of the pushed args); 0 reads the args backwards /
+						// out of range, so e.g. BusEvent's super saw undefined.
+						call_method( function, &env, obj.get_ptr(), arg_count, env.get_top_index());
 					}
 
 					//stack.top(0) = obj.get_ptr();
@@ -1487,12 +1516,15 @@ namespace gameswf
 							new_object->set_instance( m_abc->get_instance_info( name ) );
 						}
 
-						// Call the constructor if we have one
-						as_function* ctor = m_abc->get_class_constructor(name);
-						if (ctor)
-						{
-							call_method(ctor, &env, new_object.get_ptr(), arg_count, 0);
-						}
+					// Call the constructor if we have one
+					as_function* ctor = m_abc->get_class_constructor(name);
+					if (ctor)
+					{
+						// Must be the index of arg1 inside env (like every
+						// other call_method site); 0 made ctor locals
+						// undefined, so `new BusEvent(type, data)` lost data.
+						call_method(ctor, &env, new_object.get_ptr(), arg_count, env.get_top_index());
+					}
 					}
 					IF_VERBOSE_ACTION(log_msg("EX: constructprop\t 0x%p.%s(args:%d)\n", obj, name, arg_count));
 
@@ -1661,7 +1693,7 @@ namespace gameswf
 					if (target_sprite && strcmp(name, "addChildAt") == 0 && arg_count >= 2)
 					{
 						character* child = stack.top(1).to_object() ? cast_to<character>(stack.top(1).to_object()) : NULL;
-						int idx = (int)stack.top(0).to_number();
+						int idx = stack.top(0).to_int();
 						target_sprite->avm2_add_child_at(child, idx);
 						stack.drop(arg_count + 1);
 						break;
@@ -1675,7 +1707,7 @@ namespace gameswf
 					}
 					if (target_sprite && strcmp(name, "removeChildAt") == 0 && arg_count >= 1)
 					{
-						int idx = (int)stack.top(0).to_number();
+						int idx = stack.top(0).to_int();
 						target_sprite->avm2_remove_child_at(idx);
 						stack.drop(arg_count + 1);
 						break;
@@ -1683,7 +1715,7 @@ namespace gameswf
 					if (target_sprite && strcmp(name, "setChildIndex") == 0 && arg_count >= 2)
 					{
 						character* child = stack.top(1).to_object() ? cast_to<character>(stack.top(1).to_object()) : NULL;
-						int idx = (int)stack.top(0).to_number();
+						int idx = stack.top(0).to_int();
 						target_sprite->avm2_set_child_index(child, idx);
 						stack.drop(arg_count + 1);
 						break;
@@ -1698,8 +1730,8 @@ namespace gameswf
 					}
 					if (target_sprite && strcmp(name, "swapChildrenAt") == 0 && arg_count >= 2)
 					{
-						int idx1 = (int)stack.top(1).to_number();
-						int idx2 = (int)stack.top(0).to_number();
+						int idx1 = stack.top(1).to_int();
+						int idx2 = stack.top(0).to_int();
 						target_sprite->avm2_swap_children_at(idx1, idx2);
 						stack.drop(arg_count + 1);
 						break;
@@ -2043,6 +2075,12 @@ namespace gameswf
 						}
 					}
 
+					if (val.is_function())
+					{
+						as_object* getter_owner = scope.find_property(name);
+						avm2_resolve_getter(getter_owner, name, &val);
+					}
+
 					if(val.is_undefined())
 					{
 						static char s_lseen[512][96];
@@ -2262,6 +2300,7 @@ namespace gameswf
 							{
 								as_value result;
 								obj->get_member(name, &result);
+								avm2_resolve_getter(obj, name.c_str(), &result);
 								stack.push(result);
 							}
 							else
@@ -2287,6 +2326,7 @@ namespace gameswf
 							{
 								as_value result;
 								obj->get_member(name, &result);
+								avm2_resolve_getter(obj, name.c_str(), &result);
 								stack.push(result);
 							}
 							else
@@ -2312,6 +2352,10 @@ namespace gameswf
 											name.c_str(), obj, cur_meth);
 										fflush(stderr);
 										stack.top(0).set_undefined();
+									}
+									else
+									{
+										avm2_resolve_getter(obj, name.c_str(), &stack.top(0));
 									}
 								}
 								else
@@ -2344,17 +2388,20 @@ namespace gameswf
 						break;
 					}
 
-					// Track which object a method reference was read from so
-					// event listeners run with the correct `this`.  Skip values
-					// that come from a non-method trait (slot/const): those are
-					// not bound to the reader, and recording them would clobber
-					// the owner of e.g. HandlerAction.m_hanlderFun -- the very
-					// function that has to run with GameMain's `this`.
-					if (obj != NULL && stack.size() > 0 && stack.top(0).is_function()
-						&& avm2_is_nonmethod_trait(obj, name.c_str()) == false)
-					{
-						avm2_note_method_owner(obj, stack.top(0));
-					}
+				// Track which object a method reference was read from so
+				// event listeners run with the correct `this`.  Skip values
+				// that come from a non-method trait (slot/const): those are
+				// not bound to the reader, and recording them would clobber
+				// the owner of e.g. HandlerAction.m_hanlderFun -- the very
+				// function that has to run with GameMain's `this`.
+				// Getters are excluded too: a function that came back from a
+				// getter is the getter's RETURN VALUE, not a method of obj.
+				if (obj != NULL && stack.size() > 0 && stack.top(0).is_function()
+					&& avm2_is_nonmethod_trait(obj, name.c_str()) == false
+					&& obj->is_getter_trait(name.c_str()) == false)
+				{
+					avm2_note_method_owner(obj, stack.top(0));
+				}
 
 					break;
 				}
@@ -2724,7 +2771,7 @@ namespace gameswf
 			case 0x97:	// bitnot
 			{
 				as_value val = stack.pop();
-				stack.push(as_value((double)(~(int)val.to_number())));
+				stack.push(as_value((double)(~val.to_int())));
 				IF_VERBOSE_ACTION(log_msg("EX: bitnot\n"));
 				break;
 			}
@@ -3067,7 +3114,7 @@ namespace gameswf
 					ip += 3;
 					int case_count;
 					ip += read_vu30(case_count, &m_code[ip]);
-					int index = (int)stack.pop().to_number();
+					int index = stack.pop().to_int();
 					int target = default_offset;
 					if (index >= 0 && index <= case_count)
 						{
@@ -3094,7 +3141,7 @@ namespace gameswf
 				as_value index_val = stack.pop();
 				as_value obj_val = stack.pop();
 				
-				int index = (int)index_val.to_number();
+				int index = index_val.to_int();
 				as_object* obj = obj_val.to_object();
 				
 				int next_index = 0;
@@ -3122,7 +3169,7 @@ namespace gameswf
 				as_value index_val = stack.pop();
 				as_value obj_val = stack.pop();
 				
-				int index = (int)index_val.to_number();
+				int index = index_val.to_int();
 				as_object* obj = obj_val.to_object();
 				
 				if (obj && index >= 1)
@@ -3185,7 +3232,7 @@ namespace gameswf
 					
 					// Get the object and current index from registers
 					as_value obj_val = lregister[obj_reg];
-					int cur_index = (int)lregister[index_reg].to_number();
+					int cur_index = lregister[index_reg].to_int();
 					
 					bool has_next = false;
 					as_object* obj = obj_val.to_object();
@@ -3272,7 +3319,7 @@ namespace gameswf
 				case 0x74:	// convert_u
 				{
 					as_value v = stack.pop();
-					stack.push(as_value((double)(Uint32)v.to_number()));
+					stack.push(as_value((double)v.to_uint()));
 					break;
 				}
 
@@ -3329,7 +3376,7 @@ namespace gameswf
 				case 0x88:	// coerce_u
 				{
 					as_value v = stack.pop();
-					stack.push(as_value((double)(Uint32)v.to_number()));
+					stack.push(as_value((double)v.to_uint()));
 					break;
 				}
 
@@ -3401,7 +3448,7 @@ namespace gameswf
 				{
 					as_value b = stack.pop();
 					as_value a = stack.pop();
-					stack.push(as_value((double)((int)a.to_number() << ((int)b.to_number() & 31))));
+					stack.push(as_value((double)(a.to_int() << (b.to_int() & 31))));
 					break;
 				}
 
@@ -3409,7 +3456,7 @@ namespace gameswf
 				{
 					as_value b = stack.pop();
 					as_value a = stack.pop();
-					stack.push(as_value((double)((int)a.to_number() >> ((int)b.to_number() & 31))));
+					stack.push(as_value((double)(a.to_int() >> (b.to_int() & 31))));
 					break;
 				}
 
@@ -3417,7 +3464,7 @@ namespace gameswf
 				{
 					as_value b = stack.pop();
 					as_value a = stack.pop();
-					stack.push(as_value((double)((Uint32)a.to_number() >> ((int)b.to_number() & 31))));
+					stack.push(as_value((double)(a.to_uint() >> (b.to_int() & 31))));
 					break;
 				}
 
@@ -3425,7 +3472,7 @@ namespace gameswf
 				{
 					as_value b = stack.pop();
 					as_value a = stack.pop();
-					stack.push(as_value((double)((int)a.to_number() & (int)b.to_number())));
+					stack.push(as_value((double)(a.to_int() & b.to_int())));
 					break;
 				}
 
@@ -3433,7 +3480,7 @@ namespace gameswf
 				{
 					as_value b = stack.pop();
 					as_value a = stack.pop();
-					stack.push(as_value((double)((int)a.to_number() | (int)b.to_number())));
+					stack.push(as_value((double)(a.to_int() | b.to_int())));
 					break;
 				}
 
@@ -3441,7 +3488,7 @@ namespace gameswf
 				{
 					as_value b = stack.pop();
 					as_value a = stack.pop();
-					stack.push(as_value((double)((int)a.to_number() ^ (int)b.to_number())));
+					stack.push(as_value((double)(a.to_int() ^ b.to_int())));
 					break;
 				}
 
@@ -3590,14 +3637,14 @@ namespace gameswf
 				case 0xC0:	// increment_i
 				{
 					as_value v = stack.pop();
-					stack.push(as_value((double)((int)v.to_number() + 1)));
+					stack.push(as_value((double)(v.to_int() + 1)));
 					break;
 				}
 
 				case 0xC1:	// decrement_i
 				{
 					as_value v = stack.pop();
-					stack.push(as_value((double)((int)v.to_number() - 1)));
+					stack.push(as_value((double)(v.to_int() - 1)));
 					break;
 				}
 
@@ -3613,7 +3660,7 @@ namespace gameswf
 							_shift += 7;
 						}
 					}
-					lregister[reg] = as_value((double)((int)lregister[reg].to_number() - 1));
+					lregister[reg] = as_value((double)(lregister[reg].to_int() - 1));
 					IF_VERBOSE_ACTION(log_msg("EX: declocal_i %d\n", reg));
 					break;
 				}
@@ -3621,7 +3668,7 @@ namespace gameswf
 				case 0xC4:	// negate_i
 				{
 					as_value v = stack.pop();
-					stack.push(as_value((double)(-(int)v.to_number())));
+					stack.push(as_value((double)(-v.to_int())));
 					break;
 				}
 
@@ -3629,7 +3676,7 @@ namespace gameswf
 				{
 					as_value b = stack.pop();
 					as_value a = stack.pop();
-					stack.push(as_value((double)((int)a.to_number() + (int)b.to_number())));
+					stack.push(as_value((double)(a.to_int() + b.to_int())));
 					break;
 				}
 
@@ -3637,7 +3684,7 @@ namespace gameswf
 				{
 					as_value b = stack.pop();
 					as_value a = stack.pop();
-					stack.push(as_value((double)((int)a.to_number() - (int)b.to_number())));
+					stack.push(as_value((double)(a.to_int() - b.to_int())));
 					break;
 				}
 
@@ -3645,7 +3692,7 @@ namespace gameswf
 				{
 					as_value b = stack.pop();
 					as_value a = stack.pop();
-					stack.push(as_value((double)((int)a.to_number() * (int)b.to_number())));
+					stack.push(as_value((double)(a.to_int() * b.to_int())));
 					break;
 				}
 
@@ -4203,7 +4250,7 @@ namespace gameswf
 							_shift += 7;
 						}
 					}
-					lregister[reg] = as_value((int)lregister[reg].to_number() - 1);
+					lregister[reg] = as_value(lregister[reg].to_int() - 1);
 					IF_VERBOSE_ACTION(log_msg("EX: declocal %d\n", reg));
 					break;
 				}
@@ -4395,7 +4442,7 @@ namespace gameswf
 				as_value index_val = stack.pop();
 				as_value obj_val = stack.pop();
 				
-				int index = (int)index_val.to_number();
+				int index = index_val.to_int();
 				as_object* obj = obj_val.to_object();
 				
 				if (obj && index >= 1)
@@ -4838,7 +4885,7 @@ namespace gameswf
 			case 0x50:	// sxi1 - sign extend 1-bit value
 			{
 				as_value v = stack.pop();
-				int x = ((int)v.to_number()) & 1;
+				int x = (v.to_int()) & 1;
 				stack.push(as_value(x ? -1.0 : 0.0));
 				IF_VERBOSE_ACTION(log_msg("EX: sxi1\n"));
 				break;
@@ -4847,7 +4894,7 @@ namespace gameswf
 			case 0x51:	// sxi8 - sign extend 8-bit value
 			{
 				as_value v = stack.pop();
-				stack.push(as_value((double)(int8_t)(int)v.to_number()));
+				stack.push(as_value((double)(int8_t)v.to_int()));
 				IF_VERBOSE_ACTION(log_msg("EX: sxi8\n"));
 				break;
 			}
@@ -4855,7 +4902,7 @@ namespace gameswf
 			case 0x52:	// sxi16 - sign extend 16-bit value
 			{
 				as_value v = stack.pop();
-				stack.push(as_value((double)(int16_t)(int)v.to_number()));
+				stack.push(as_value((double)(int16_t)v.to_int()));
 				IF_VERBOSE_ACTION(log_msg("EX: sxi16\n"));
 				break;
 			}
