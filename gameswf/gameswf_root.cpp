@@ -143,6 +143,16 @@ namespace gameswf
 				{
 					// onReleaseOutside
 					active_entity->on_event( event_id::RELEASE_OUTSIDE );
+
+					// Flash still delivers mouseUp to whatever sits under
+					// the cursor at release time (bubbling upward).  This
+					// matters when the target was replaced or covered
+					// between press and release: without it, root-level
+					// mouseUp listeners never see the release at all.
+					if (topmost_entity != NULL)
+					{
+						topmost_entity->on_event( event_id::MOUSE_UP );
+					}
 				}
 			}
 		}
@@ -178,6 +188,27 @@ namespace gameswf
 			// mouse button press
 			{
 				// onPress
+
+				// The mouse may have reached a new object since the last
+				// roll update (movement across a frame boundary or a
+				// synthetic warp+press).  The roll branch above is the
+				// "else" of this press branch, so it never runs on the
+				// press frame itself.  Sync first so the press lands on
+				// what is actually under the cursor; otherwise press and
+				// release target a stale entity and the click is lost.
+				if (topmost_entity != active_entity)
+				{
+					if (active_entity != NULL && ms->m_mouse_inside_entity_last)
+					{
+						active_entity->on_event(event_id::ROLL_OUT);
+					}
+					active_entity = topmost_entity;
+					if (active_entity != NULL)
+					{
+						active_entity->on_event(event_id::ROLL_OVER);
+					}
+					ms->m_mouse_inside_entity_last = true;
+				}
 
 				m_mouse_listener.notify(event_id::MOUSE_DOWN);
 
