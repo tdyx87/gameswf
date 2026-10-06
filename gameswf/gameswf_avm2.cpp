@@ -118,6 +118,114 @@ namespace gameswf
 		avm2_method_owners().clear();
 	}
 
+	as_value	avm2_listener_function_value(const as_value& listener)
+	{
+		if (listener.is_function() == false && listener.is_object() && listener.to_object() != NULL)
+		{
+			as_value fn;
+			if (listener.to_object()->get_member("__evlf", &fn) && fn.is_function())
+			{
+				return fn;
+			}
+		}
+		return listener;
+	}
+
+	as_object*	avm2_listener_bound_this(const as_value& listener, as_object* fallback)
+	{
+		if (listener.is_function() == false && listener.is_object() && listener.to_object() != NULL)
+		{
+			as_value bound;
+			if (listener.to_object()->get_member("__evlt", &bound))
+			{
+				as_object* obj = bound.to_object();
+				if (obj != NULL)
+				{
+					return obj;
+				}
+			}
+		}
+		return fallback;
+	}
+
+	// AVM2 materializes every declared instance slot at construction.
+	// gameswf only did that for timeline (SymbolClass) instances; `new Foo()`
+	// (constructprop) left no-initializer vars without a member entry, so
+	// getprop logged CLASS_MISS/GPF and read undefined (e.g. the mouse
+	// manager's m_handMC).  Seed slot/const traits with their declared
+	// defaults before running the constructor body.
+	static void avm2_seed_instance_slots(as_object* obj, instance_info* ii)
+	{
+		if (obj == NULL || ii == NULL)
+		{
+			return;
+		}
+		abc_def* abc = ii->m_abc.get_ptr();
+		if (abc == NULL)
+		{
+			return;
+		}
+		for (int i = 0; i < ii->m_trait.size(); i++)
+		{
+			traits_info* ti = ii->m_trait[i].get();
+			if (ti == NULL ||
+				(ti->m_kind != traits_info::Trait_Slot && ti->m_kind != traits_info::Trait_Const))
+			{
+				continue;
+			}
+			const char* name = abc->get_multiname(ti->m_name);
+			if (name == NULL)
+			{
+				continue;
+			}
+			as_value val;
+			int vindex = ti->trait_slot.m_vindex;
+			Uint8 vkind = ti->trait_slot.m_vkind;
+			if (vindex > 0)
+			{
+				switch (vkind)
+				{
+					case 0x01:	// utf8 string
+						val.set_string(abc->get_string(vindex));
+						break;
+					case 0x03:	// signed integer
+						val.set_int(abc->get_integer(vindex));
+						break;
+					case 0x04:	// unsigned integer
+						if (vindex < (int)abc->m_uinteger.size())
+						{
+							val.set_int((int)abc->m_uinteger[vindex]);
+						}
+						else
+						{
+							val.set_int(0);
+						}
+						break;
+					case 0x06:	// double
+						val.set_double(abc->get_double(vindex));
+						break;
+					case 0x0A:	// false
+						val.set_bool(false);
+						break;
+					case 0x0B:	// true
+						val.set_bool(true);
+						break;
+					case 0x0C:	// null
+						val.set_null();
+						break;
+					default:	// 0x00 undefined, 0x08 namespace, unknown
+						val.set_undefined();
+						break;
+				}
+			}
+			else
+			{
+				val.set_undefined();
+			}
+			obj->set_member(name, val);
+		}
+	}
+
 	// Resolve a slot id to the name declared by the running method's body
 	// traits (activation slots).  Storing activation slots under their real
 	// names is what lets getlex/findpropstrict inside a closure created by
@@ -353,39 +461,19 @@ namespace gameswf
 
 		for (int i = 0; i < (int)snapshot.size(); i++)
 		{
-			as_value listener = snapshot[i];
+			as_value listener = avm2_listener_function_value(snapshot[i]);
 			if (listener.is_function())
 			{
-				// Prefer the object the method was read from as `this`; fall
-				// back to the dispatch target for plain closures.
-				as_object* this_ptr = target;
-				as_value owner;
-				bool has_owner = avm2_method_owners().get(listener.to_function(), &owner)
-					&& owner.is_object() && owner.to_object() != NULL;
-				if (has_owner)
-				{
-					this_ptr = owner.to_object();
-				}
-				AVM2_TRACE_FPRINTF( "[MLISTEN] fn=%p target=%p owner=%p this=%p\n",
-					(void*)listener.to_function(), (void*)target,
-					has_owner ? (void*)this_ptr : NULL, (void*)this_ptr);
-				{
-					as_object* p = this_ptr;
-					int depth = 0;
-					while (p != NULL && depth < 8)
-					{
-						as_value v;
-						bool got = p->get_member("dispatchEvent", &v);
-						AVM2_TRACE_FPRINTF( "[MPROTO] d=%d obj=%p hasDispatch=%d\n",
-							depth, (void*)p, got ? 1 : 0);
-						p = p->get_proto();
-						depth++;
-					}
-					fflush(stderr);
-				}
+				// The wrapper carries the receiver captured at registration
+				// time (the object the method was read from); plain listeners
+				// fall back to the dispatch target.
+				as_object* this_ptr = avm2_listener_bound_this(snapshot[i], target);
+				AVM2_TRACE_FPRINTF( "[MLISTEN] fn=%p target=%p this=%p bound=%d\n",
+					(void*)listener.to_function(), (void*)target, (void*)this_ptr,
+					this_ptr != target ? 1 : 0);
 				fflush(stderr);
 				env->push(evt);
-				call_method(listener, env, this_ptr, 1, env->get_top_index());
+				call_method(listener, env, as_value(this_ptr), 1, env->get_top_index());
 				env->drop(1);
 			}
 		}
@@ -451,14 +539,14 @@ namespace gameswf
 		{
 			return false;
 		}
-		as_object* remove_obj = listener.to_object();
+		as_object* remove_obj = avm2_listener_function_value(listener).to_object();
 		if (remove_obj == NULL)
 		{
 			return false;
 		}
 		for (int i = 0; i < arr->size(); i++)
 		{
-			if (arr->m_array[i].to_object() == remove_obj)
+			if (avm2_listener_function_value(arr->m_array[i]).to_object() == remove_obj)
 			{
 				arr->remove(i);
 				if (arr->size() == 0)
@@ -1186,6 +1274,10 @@ namespace gameswf
 					tu_string class_name = m_abc->get_class_from_constructor( m_method );
 					tu_string super_class_name = m_abc->get_super_class( class_name );
 
+					// Seed the super class's own instance slots (no-op when the
+					// super is a gameswf built-in with no instance_info).
+					avm2_seed_instance_slots(obj.get_ptr(), m_abc->get_instance_info(super_class_name));
+
 					as_object * super = obj.get_ptr();
 
 					while( super->get_proto() )
@@ -1516,6 +1608,10 @@ namespace gameswf
 							new_object->set_instance( m_abc->get_instance_info( name ) );
 						}
 
+					// Materialize instance slot defaults before the constructor
+					// body runs (see avm2_seed_instance_slots).
+					avm2_seed_instance_slots(new_object.get_ptr(), m_abc->get_instance_info(name));
+
 					// Call the constructor if we have one
 					as_function* ctor = m_abc->get_class_constructor(name);
 					if (ctor)
@@ -1623,13 +1719,13 @@ namespace gameswf
 						// retry/error handlers re-register on every cycle, so
 						// without this guard the array grows without bound and
 						// each dispatch re-runs every stale copy.
-						as_object* listener_obj = listener.to_object();
+						as_object* listener_obj = avm2_listener_function_value(listener).to_object();
 						bool duplicate = false;
 						if (listener_obj != NULL)
 						{
 							for (int i = 0; i < listeners_array->size(); i++)
 							{
-								if (listeners_array->m_array[i].to_object() == listener_obj)
+								if (avm2_listener_function_value(listeners_array->m_array[i]).to_object() == listener_obj)
 								{
 									duplicate = true;
 									break;
@@ -1641,12 +1737,35 @@ namespace gameswf
 							stack.drop(arg_count + 1);
 							break;
 						}
-						listeners_array->push(listener);
-						AVM2_TRACE_FPRINTF( "[ADDLIS] target=%p type='%s' key='%s' listener_isfn=%d count=%d fn=%p sprite=%d\n",
+
+						// Capture the receiver NOW.  The method-owner map
+						// reflects the object the method was just read from --
+						// exactly the AS3 method-closure binding.  Later reads
+						// of the same (shared) function from other objects
+						// clobber the map, so store the binding with the
+						// listener whenever it differs from the registration
+						// target (e.g. controller.onTick registered on root).
+						as_value stored_listener = listener;
+						if (listener.is_function())
+						{
+							as_value owner;
+							if (avm2_method_owners().get(listener.to_function(), &owner)
+								&& owner.is_object() && owner.to_object() != NULL
+								&& owner.to_object() != target)
+							{
+								as_object* wrapper = new as_object(get_player());
+								wrapper->set_member("__evlf", listener);
+								wrapper->set_member("__evlt", owner);
+								stored_listener = as_value(wrapper);
+							}
+						}
+						listeners_array->push(stored_listener);
+						AVM2_TRACE_FPRINTF( "[ADDLIS] target=%p type='%s' key='%s' listener_isfn=%d count=%d fn=%p sprite=%d bound=%p\n",
 							target, event_type_str.c_str(), event_key.c_str(),
 							listener.is_function() ? 1 : 0, listeners_array->size(),
 							listener.is_function() ? (void*)listener.to_function() : NULL,
-							cast_to<sprite_instance>(target) != NULL ? 1 : 0);
+							cast_to<sprite_instance>(target) != NULL ? 1 : 0,
+							(void*)avm2_listener_bound_this(stored_listener, target));
 					}
 					stack.drop(arg_count + 1);
 						break;

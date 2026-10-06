@@ -35,6 +35,17 @@ namespace gameswf
 	// listener function.  Returns true when a listener was found and called.
 	exported_module bool	avm2_dispatch_event(as_object* obj, as_environment* env, const char* event_type);
 
+	// Bound-listener helpers for the "__events_" storage.  addEventListener
+	// wraps a listener whose method-owner differs from the registration
+	// target in a small object ({__evlf: fn, __evlt: receiver}) so the AS3
+	// method closure keeps its `this` at dispatch time (e.g. a controller
+	// method registered on root must still run with the controller as
+	// `this`).  avm2_listener_function_value() returns the callable function
+	// (unwrapping the wrapper when needed); avm2_listener_bound_this()
+	// returns the wrapper's stored receiver, or fallback when unwrapped.
+	exported_module as_value	avm2_listener_function_value(const as_value& listener);
+	exported_module as_object*	avm2_listener_bound_this(const as_value& listener, as_object* fallback);
+
 	// Maps an event_id to the matching AS3 event type name (the string passed
 	// to addEventListener).  Returns NULL when there is no AS3 equivalent.
 	exported_module const char*	avm2_event_type_name(int event_id_code);

@@ -1515,11 +1515,21 @@ namespace gameswf
 					bool called = false;
 					for (int i = 0; i < (int) snapshot.size(); i++)
 					{
-						as_value listener = snapshot[i];
+						as_value listener = avm2_listener_function_value(snapshot[i]);
 						if (listener.is_function())
 						{
+							// A wrapper carries the receiver captured at
+							// registration (AS3 method-closure binding);
+							// plain listeners run with this level as `this`.
+							as_object* receiver = avm2_listener_bound_this(snapshot[i], level);
+							if (receiver != level)
+							{
+								SPRITE_TRACE_FPRINTF( "[EBOUND] fn=%p bound=%p level=%p type=%s\n",
+									(void*)listener.to_function(), (void*)receiver,
+									(void*)level, event_type);
+							}
 							env->push(event_val);
-							gameswf::call_method(listener, env, level, 1, env->get_top_index());
+							gameswf::call_method(listener, env, as_value(receiver), 1, env->get_top_index());
 							env->drop(1);
 							called = true;
 						}
