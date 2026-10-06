@@ -511,17 +511,19 @@ namespace gameswf
 					// Flash fires "click" when press and release happen on the
 					// same character; gameswf only sends RELEASE in that case
 					// (otherwise RELEASE_OUTSIDE), so RELEASE doubles as click.
-					else if (id.m_id == event_id::RELEASE
+					// Dispatch each type independently so an ancestor's
+					// listener for one type cannot starve another.
+					if (id.m_id == event_id::RELEASE
 						&& avm2_dispatch_event(this, env, "click"))
 					{
 						called = true;
 					}
-					else if (id.m_id == event_id::ROLL_OVER
+					if (id.m_id == event_id::ROLL_OVER
 						&& avm2_dispatch_event(this, env, "mouseOver"))
 					{
 						called = true;
 					}
-					else if (id.m_id == event_id::ROLL_OUT
+					if (id.m_id == event_id::ROLL_OUT
 						&& avm2_dispatch_event(this, env, "mouseOut"))
 					{
 						called = true;

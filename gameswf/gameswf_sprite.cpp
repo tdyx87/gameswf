@@ -153,31 +153,77 @@ namespace gameswf
 
 	// Functions that qualify as mouse event handlers.
 
+	static const tu_stringi s_as2_mouse_fn_names[] =
+	{
+		"onKeyPress",
+		"onRelease",
+		"onDragOver",
+		"onDragOut",
+		"onPress",
+		"onReleaseOutside",
+		"onRollout",
+		"onRollover",
+		"onMouseMove",
+	};
+
+	static bool	has_as2_mouse_handler(as_object* obj)
+	{
+		as_value dummy;
+		for (size_t i = 0; i < TU_ARRAYSIZE(s_as2_mouse_fn_names); i++)
+		{
+			if (obj->get_member(s_as2_mouse_fn_names[i], &dummy))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static bool	has_as3_mouse_listener(as_object* obj)
+	// True when addEventListener() registered a mouse event type on obj.
+	// Without this, AS3-only MovieClips were never picked as the mouse
+	// target (can_handle_mouse_event used to look at AS2 names only) and
+	// their listeners never fired.
+	{
+		static const char* s_as3_mouse_types[] =
+		{
+			"click",
+			"mouseDown",
+			"mouseUp",
+			"mouseOver",
+			"mouseOut",
+			"mouseMove",
+			"rollOver",
+			"rollOut",
+			"releaseOutside",
+			"dragOver",
+			"dragOut",
+		};
+		as_value dummy;
+		for (size_t i = 0; i < TU_ARRAYSIZE(s_as3_mouse_types); i++)
+		{
+			tu_string key = "__events_";
+			key += s_as3_mouse_types[i];
+			if (obj->get_member(key, &dummy))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool sprite_instance::can_handle_mouse_event()
 	// Return true if we have any mouse event handlers.
 	{
-		static const tu_stringi FN_NAMES[] =
-		{
-			"onKeyPress",
-			"onRelease",
-			"onDragOver",
-			"onDragOut",
-			"onPress",
-			"onReleaseOutside",
-			"onRollout",
-			"onRollover",
-			"onMouseMove",
-		};
-
 		if (is_enabled())
 		{
-			for (size_t i = 0; i < TU_ARRAYSIZE(FN_NAMES); i++)
+			if (has_as2_mouse_handler(this))
 			{
-				as_value dummy;
-				if (get_member(FN_NAMES[i], &dummy))
-				{
-					return true;
-				}
+				return true;
+			}
+			if (has_as3_mouse_listener(this))
+			{
+				return true;
 			}
 		}
 		return false;
@@ -226,15 +272,24 @@ namespace gameswf
 		}
 
 		//  THIS is closest to root
-		if (this_has_focus && can_handle_mouse_event())
+		if (this_has_focus && is_enabled() && has_as2_mouse_handler(this))
 		{
+			// AS2 semantics: the closest-to-root ancestor that has
+			// onRelease/onPress etc. owns the mouse (unchanged).
 			top_ent = this;
 		}
-		else
-		// else character which has event is closest to root
-		if (top_te)
+		else if (top_te)
 		{
+			// A capable descendant claimed the hit.  For AS3 that is the
+			// desired target: Flash dispatches to the deepest object under
+			// the mouse and bubbles upward, so prefer the child's claim
+			// over this level's own listeners.
 			top_ent = top_te;
+		}
+		else if (this_has_focus && is_enabled() && has_as3_mouse_listener(this))
+		{
+			// AS3 listeners on this sprite and nothing deeper claimed it.
+			top_ent = this;
 		}
 
 		// else if we have focus then return not NULL
@@ -1409,74 +1464,103 @@ namespace gameswf
 		tu_string key = "__events_";
 		key += event_type;
 
-		as_value handlers;
-		if (obj->get_member(key, &handlers) == false)
-		{
-			return false;
-		}
-
-		as_array* listeners_array = NULL;
-		if (handlers.is_object())
-		{
-			listeners_array = cast_to<as_array>(handlers.to_object());
-		}
-
-		if (listeners_array == NULL && handlers.is_function() == false)
-		{
-			return false;
-		}
+		// Flash bubbles mouse/keyboard interaction events from the object
+		// under the mouse up through its ancestors; per-frame and pointer
+		// tracking events stay on their target.
+		bool bubbles = strcmp(event_type, "mouseMove") != 0
+			&& strcmp(event_type, "mouseLeave") != 0
+			&& strcmp(event_type, "enterFrame") != 0
+			&& strcmp(event_type, "load") != 0
+			&& strcmp(event_type, "unload") != 0
+			&& strcmp(event_type, "initialize") != 0
+			&& strcmp(event_type, "construct") != 0;
 
 		// Build the Event object.  Keep a strong reference across the whole
 		// dispatch: push()/drop() only borrow the reference on the VM stack,
 		// so a raw as_object* would be deleted after the first listener.
 		gc_ptr<as_object> event_obj(new as_object(obj->get_player()));
 		event_obj->set_member("type", as_value(event_type));
+		event_obj->set_member("bubbles", as_value(bubbles));
+		event_obj->set_member("target", as_value(obj));
 		as_value event_val(event_obj.get_ptr());
 
-		if (listeners_array != NULL)
+		bool any_called = false;
+		as_object* level = obj;
+		while (level != NULL)
 		{
-			// Call all listeners.  Copy first: a listener may add or remove
-			// listeners while we iterate.
-			array<as_value> snapshot;
-			snapshot.resize(listeners_array->size());
-			for (int i = 0; i < listeners_array->size(); i++)
+			as_value handlers;
+			if (level->get_member(key, &handlers))
 			{
-				snapshot[i] = listeners_array->m_array[i];
-			}
+				// Flash updates currentTarget to the object whose listener
+				// is running as the event bubbles.
+				event_obj->set_member("currentTarget", as_value(level));
 
-			bool called = false;
-			for (int i = 0; i < (int) snapshot.size(); i++)
-			{
-				as_value listener = snapshot[i];
-				if (listener.is_function())
+				as_array* listeners_array = NULL;
+				if (handlers.is_object())
 				{
+					listeners_array = cast_to<as_array>(handlers.to_object());
+				}
+
+				if (listeners_array != NULL)
+				{
+					// Call all listeners.  Copy first: a listener may add or
+					// remove listeners while we iterate.
+					array<as_value> snapshot;
+					snapshot.resize(listeners_array->size());
+					for (int i = 0; i < listeners_array->size(); i++)
+					{
+						snapshot[i] = listeners_array->m_array[i];
+					}
+
+					bool called = false;
+					for (int i = 0; i < (int) snapshot.size(); i++)
+					{
+						as_value listener = snapshot[i];
+						if (listener.is_function())
+						{
+							env->push(event_val);
+							gameswf::call_method(listener, env, level, 1, env->get_top_index());
+							env->drop(1);
+							called = true;
+						}
+					}
+					if (called)
+					{
+						any_called = true;
+						if (strcmp(event_type, "enterFrame") != 0)
+						{
+							character* ch = cast_to<character>(level);
+							SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=%d\n",
+								(void*) level, ch != NULL ? ch->get_name().c_str() : "?",
+								event_type, (int) snapshot.size());
+						}
+					}
+				}
+				else if (handlers.is_function())
+				{
+					// Legacy single listener format.
 					env->push(event_val);
-					gameswf::call_method(listener, env, obj, 1, env->get_top_index());
+					gameswf::call_method(handlers, env, level, 1, env->get_top_index());
 					env->drop(1);
-					called = true;
+					any_called = true;
+					if (strcmp(event_type, "enterFrame") != 0)
+					{
+						character* ch = cast_to<character>(level);
+						SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=1\n",
+							(void*) level, ch != NULL ? ch->get_name().c_str() : "?", event_type);
+					}
 				}
 			}
-			if (called && strcmp(event_type, "enterFrame") != 0)
+
+			if (bubbles == false)
 			{
-				character* ch = cast_to<character>(obj);
-				SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=%d\n",
-					(void*) obj, ch != NULL ? ch->get_name().c_str() : "?",
-					event_type, (int) snapshot.size());
+				break;
 			}
-			return called;
+			character* ch = cast_to<character>(level);
+			level = ch != NULL ? ch->get_parent() : NULL;
 		}
 
-		// Legacy single listener format.
-		env->push(event_val);
-		gameswf::call_method(handlers, env, obj, 1, env->get_top_index());
-		env->drop(1);
-		if (strcmp(event_type, "enterFrame") != 0)
-		{
-			character* ch = cast_to<character>(obj);
-			SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=1\n",
-				(void*) obj, ch != NULL ? ch->get_name().c_str() : "?", event_type);
-		}
-		return true;
+		return any_called;
 	}
 
 	bool sprite_instance::dispatch_avm2_event(const char* event_type)
@@ -1521,26 +1605,30 @@ namespace gameswf
 		const char* avm2_type = avm2_event_type_name(id.m_id);
 		if (avm2_type != NULL)
 		{
-			if (dispatch_avm2_event(avm2_type))
-			{
-				return true;
-			}
+			bool handled = dispatch_avm2_event(avm2_type);
 
-			// Flash fires "click" when the mouse is pressed and released on
-			// the same character.  gameswf only sends RELEASE in exactly that
-			// case (otherwise it sends RELEASE_OUTSIDE), so RELEASE doubles
-			// as the click event here.
-			if (id.m_id == event_id::RELEASE && dispatch_avm2_event("click"))
+			// Flash fires "click" in addition to "mouseUp" when the mouse
+			// is pressed and released on the same character.  gameswf only
+			// sends RELEASE in exactly that case (otherwise it sends
+			// RELEASE_OUTSIDE), so RELEASE doubles as the click event here.
+			// Dispatch independently: an ancestor's "mouseUp" listener must
+			// not starve a "click" listener further down (or vice versa).
+			if (id.m_id == event_id::RELEASE)
 			{
-				return true;
+				handled = dispatch_avm2_event("click") || handled;
 			}
 
 			// Buttons also react to rollOver/rollOut on hover.
-			if (id.m_id == event_id::ROLL_OVER && dispatch_avm2_event("mouseOver"))
+			if (id.m_id == event_id::ROLL_OVER)
 			{
-				return true;
+				handled = dispatch_avm2_event("mouseOver") || handled;
 			}
-			if (id.m_id == event_id::ROLL_OUT && dispatch_avm2_event("mouseOut"))
+			if (id.m_id == event_id::ROLL_OUT)
+			{
+				handled = dispatch_avm2_event("mouseOut") || handled;
+			}
+
+			if (handled)
 			{
 				return true;
 			}
