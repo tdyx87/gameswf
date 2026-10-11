@@ -313,6 +313,49 @@ namespace gameswf
 		}
 	}
 	
+	void string_replace(const fn_call& fn)
+	{
+		const tu_string& this_str = fn.this_value.to_tu_string();
+
+		if (fn.nargs < 2)
+		{
+			fn.result->set_tu_string(this_str);
+			return;
+		}
+
+		// AS3: a string pattern replaces only the first occurrence.
+		// RegExp patterns are not supported (no regex engine here).
+		if (fn.arg(0).is_object() && !fn.arg(0).is_null())
+		{
+			// likely a RegExp or other object; leave the string untouched
+			fn.result->set_tu_string(this_str);
+			return;
+		}
+		if (fn.arg(1).is_function())
+		{
+			// replacement callback not supported
+			fn.result->set_tu_string(this_str);
+			return;
+		}
+
+		tu_string pat = fn.arg(0).to_tu_string();
+		tu_string rep = fn.arg(1).to_tu_string();
+
+		const char* str = this_str.c_str();
+		const char* p = pat.size() > 0 ? strstr(str, pat.c_str()) : NULL;
+		if (p == NULL)
+		{
+			fn.result->set_tu_string(this_str);
+			return;
+		}
+
+		tu_string out;
+		out = tu_string(str, (int) (p - str));
+		out += rep;
+		out += p + pat.size();
+		fn.result->set_tu_string(out);
+	}
+
 	void string_to_string(const fn_call& fn)
 	{
 		const tu_string& str = fn.this_value.to_tu_string();

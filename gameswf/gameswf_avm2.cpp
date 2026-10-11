@@ -23,7 +23,7 @@
 // considerably, so keep them compiled out unless someone is actually
 // debugging the interpreter.
 #ifndef AVM2_TRACE_ENABLED
-#define AVM2_TRACE_ENABLED 1
+#define AVM2_TRACE_ENABLED 0
 #endif
 
 #if AVM2_TRACE_ENABLED
@@ -80,7 +80,16 @@ namespace gameswf
 		return s_owners;
 	}
 
-	static void avm2_note_method_owner(as_object* obj, const as_value& val)
+	// Property name each method closure was read under ('OnMouseMove' etc.).
+	// The ABC method_info name is usually empty for instance methods, so
+	// dispatch logs use this table to name the handler that ran.
+	static hash<as_function*, tu_string>& avm2_method_names()
+	{
+		static hash<as_function*, tu_string> s_names;
+		return s_names;
+	}
+
+	static void avm2_note_method_owner(as_object* obj, const as_value& val, const char* prop_name)
 	{
 		if (obj == NULL || val.is_function() == false)
 		{
@@ -89,6 +98,10 @@ namespace gameswf
 		as_value owner;
 		owner.set_as_object(obj);
 		as_function* fn = val.to_function();
+		if (fn != NULL && prop_name != NULL && prop_name[0] != '\0')
+		{
+			avm2_method_names().set(fn, tu_string(prop_name));
+		}
 		{
 			static char s_seen[1024][32];
 			static void* s_owner[1024];
@@ -146,6 +159,48 @@ namespace gameswf
 			}
 		}
 		return fallback;
+	}
+
+	as_object*	avm2_method_owner(const as_value& method)
+	{
+		if (method.is_function() == false)
+		{
+			return NULL;
+		}
+		as_value owner;
+		if (avm2_method_owners().get(method.to_function(), &owner))
+		{
+			return owner.to_object();
+		}
+		return NULL;
+	}
+
+	const char*	avm2_function_method_name(const as_value& fn)
+	{
+		if (fn.is_function() == false)
+		{
+			return NULL;
+		}
+		as_function* f = fn.to_function();
+		if (f == NULL)
+		{
+			return NULL;
+		}
+		tu_string nm;
+		if (avm2_method_names().get(f, &nm))
+		{
+			return nm.c_str();
+		}
+		if (f->is(AS_3_FUNCTION) == false)
+		{
+			return NULL;
+		}
+		as_3_function* af = static_cast<as_3_function*>(f);
+		if (af->m_abc == NULL)
+		{
+			return NULL;
+		}
+		return af->m_abc->get_multiname(af->m_name);
 	}
 
 	// AVM2 materializes every declared instance slot at construction.
@@ -371,6 +426,64 @@ namespace gameswf
 				return ti->m_kind != traits_info::Trait_Method
 					&& ti->m_kind != traits_info::Trait_Getter
 					&& ti->m_kind != traits_info::Trait_Setter;
+			}
+		}
+		return false;
+	}
+
+	// AS3 display classes a timeline object answers `is`/`as` true for.
+	// Instances that came from the SWF timeline (sprite_instance,
+	// edit_text_character) are native objects whose prototype chain never
+	// reaches the MovieClip/Sprite/... class objects built in
+	// as3_classes_init(), so walking the chain finds nothing and every
+	// `x is MovieClip` on a placed clip is false.  Scripts guard real work
+	// behind those tests: 换装_448.onAllStop() only stops the body layers
+	// inside `if (c is MovieClip)`, so LV1 was never stopped and the
+	// child's clothes kept animating on their own.
+	static const char* const s_avm2_movieclip_types[] = {
+		"MovieClip", "Sprite", "DisplayObjectContainer",
+		"InteractiveObject", "DisplayObject", NULL };
+	static const char* const s_avm2_textfield_types[] = {
+		"TextField", "InteractiveObject", "DisplayObject", NULL };
+
+	// True when the AS3 display class object `type` is one of the classes
+	// that `val` (a timeline instance) belongs to.
+	static bool avm2_display_instance_of(as_object* val, as_object* type)
+	{
+		if (val == NULL || type == NULL)
+		{
+			return false;
+		}
+		const char* const* names = NULL;
+		character* ch = cast_to<character>(val);
+		if (ch != NULL)
+		{
+			const char* t = ch->type_of();
+			if (t != NULL && strcmp(t, "movieclip") == 0)
+			{
+				names = s_avm2_movieclip_types;
+			}
+			else if (t != NULL && strcmp(t, "edittext") == 0)
+			{
+				names = s_avm2_textfield_types;
+			}
+		}
+		if (names == NULL)
+		{
+			return false;
+		}
+		player* p = val->get_player();
+		as_object* global = p != NULL ? p->get_global() : NULL;
+		if (global == NULL)
+		{
+			return false;
+		}
+		for (int i = 0; names[i] != NULL; i++)
+		{
+			as_value cls;
+			if (global->get_member(names[i], &cls) && cls.to_object() == type)
+			{
+				return true;
 			}
 		}
 		return false;
@@ -1199,12 +1312,12 @@ namespace gameswf
 							}
 						}
 						}
-						else
-						{
-							AVM2_TRACE_FPRINTF( "[CP_MISS] '%s' args=%d obj=%p meth=%s\n",
-								name, arg_count, obj, cur_meth);
-							fflush(stderr);
-						}
+					else
+					{
+						AVM2_TRACE_FPRINTF( "[CP_MISS] '%s' args=%d obj=%p meth=%s\n",
+							name, arg_count, obj, cur_meth);
+						fflush(stderr);
+					}
 					}
 					else
 					{
@@ -1760,10 +1873,17 @@ namespace gameswf
 							}
 						}
 						listeners_array->push(stored_listener);
-						AVM2_TRACE_FPRINTF( "[ADDLIS] target=%p type='%s' key='%s' listener_isfn=%d count=%d fn=%p sprite=%d bound=%p\n",
+						int lmeth = -1;
+						if (listener.is_function() && listener.to_function() != NULL
+							&& listener.to_function()->is(AS_3_FUNCTION))
+						{
+							lmeth = static_cast<as_3_function*>(listener.to_function())->m_method;
+						}
+						AVM2_TRACE_FPRINTF( "[ADDLIS] target=%p type='%s' key='%s' listener_isfn=%d count=%d fn=%p lmeth=%d sprite=%d bound=%p\n",
 							target, event_type_str.c_str(), event_key.c_str(),
 							listener.is_function() ? 1 : 0, listeners_array->size(),
 							listener.is_function() ? (void*)listener.to_function() : NULL,
+							lmeth,
 							cast_to<sprite_instance>(target) != NULL ? 1 : 0,
 							(void*)avm2_listener_bound_this(stored_listener, target));
 					}
@@ -1977,7 +2097,23 @@ namespace gameswf
 					}
 
 					as_environment env( get_player() );
-					call_method( m_abc->get_class_function( class_index ), &env, new_class.get_ptr(), 0, 0 );
+					as_function* cinit_fn = m_abc->get_class_function( class_index );
+					call_method( cinit_fn, &env, new_class.get_ptr(), 0, 0 );
+
+					{
+						// Post-cinit diagnostic: did the static initializer write
+						// its static slots (e.g. MusicController.instance) onto the
+						// class object?  A missing member here is fine for lazy
+						// singletons: as_class::get_member now returns the slot's
+						// declared default (null/undefined) until first assignment.
+						as_value inst_val;
+						bool has_inst = new_class->m_members.get("instance", &inst_val);
+						AVM2_TRACE_FPRINTF( "[CINIT] '%s' fn=%p members=%d has_instance=%d instance=%s\n",
+							class_name ? class_name : "?", (void*)cinit_fn,
+							(int)new_class->m_members.size(), (int)has_inst,
+							has_inst ? inst_val.to_xstring() : "n/a" );
+						fflush(stderr);
+					}
 
 				// Register the class in the global namespace so constructprop can find it
 				if (class_name)
@@ -2180,11 +2316,14 @@ namespace gameswf
 
 					if(val.is_undefined())
 					{
-						as_function* func = m_abc->get_script_function(name);
-						if (func != NULL)
-						{
-								gc_ptr<as_object> object = new as_object( get_player() );
-								get_global()->set_member(name, object.get());
+					as_function* func = m_abc->get_script_function(name);
+					if (func != NULL)
+					{
+							gc_ptr<as_object> object = new as_object( get_player() );
+							get_global()->set_member(name, object.get());
+							AVM2_TRACE_FPRINTF("[GETLEXFB] '%s' placeholder obj=%p\n",
+								name, (void*) object.get_ptr());
+							fflush(stderr);
 
 								as_environment env( get_player() );
 
@@ -2299,15 +2438,15 @@ namespace gameswf
 						}
 						break;
 						
-					default:
-						// Standard case: name from pool
-						{
-							name = m_abc->get_multiname(index);
-
-							as_object* obj = stack.top(1).to_object();
-							if (obj)
+						default:
+							// Standard case: name from pool
 							{
+								name = m_abc->get_multiname(index);
+
+								as_object* obj = stack.top(1).to_object();
+								if (obj)
 								{
+									{
 									static char s_pseen[512][96];
 									static int s_npseen = 0;
 									int hit = -1;
@@ -2324,6 +2463,12 @@ namespace gameswf
 											name.c_str(), stack.top(0).to_xstring(), obj);
 										fflush(stderr);
 									}
+								}
+								if (name == "instance")
+								{
+									AVM2_TRACE_FPRINTF( "[SETPROP-INST] '%s' = %s obj=%p meth=%s\n",
+										name.c_str(), stack.top(0).to_xstring(), obj, cur_meth);
+									fflush(stderr);
 								}
 								if (name == "visible" || name == "alpha" || name == "mask" || name == "x" || name == "y")
 								{
@@ -2411,10 +2556,10 @@ namespace gameswf
 						{
 							as_value name_val = stack.pop();
 							as_value obj_val = stack.pop();
-							
+
 							name = name_val.to_string();
 							obj = obj_val.to_object();
-							
+
 							if (obj)
 							{
 								as_value result;
@@ -2426,7 +2571,7 @@ namespace gameswf
 							{
 								stack.push(as_value());  // undefined
 							}
-							
+
 							IF_VERBOSE_ACTION(log_msg("EX: getproperty\t %s.%s = %s (late-bound)\n", obj_val.to_xstring(), name.c_str(), stack.top(0).to_xstring()));
 						}
 						break;
@@ -2465,13 +2610,13 @@ namespace gameswf
 
 								if (obj)
 								{
-									if (obj->get_member(name, &stack.top(0)) == false)
-									{
-										AVM2_TRACE_FPRINTF( "[GPF_MISS] '%s' obj=%p meth=%s\n",
-											name.c_str(), obj, cur_meth);
-										fflush(stderr);
-										stack.top(0).set_undefined();
-									}
+								if (obj->get_member(name, &stack.top(0)) == false)
+								{
+									AVM2_TRACE_FPRINTF( "[GPF_MISS] '%s' obj=%p meth=%s\n",
+										name.c_str(), obj, cur_meth);
+									fflush(stderr);
+									stack.top(0).set_undefined();
+								}
 									else
 									{
 										avm2_resolve_getter(obj, name.c_str(), &stack.top(0));
@@ -2496,11 +2641,11 @@ namespace gameswf
 									strncpy(s_gseen[s_ngseen], name, 95);
 									s_gseen[s_ngseen][95] = 0;
 									s_ngseen++;
-									AVM2_TRACE_FPRINTF( "[GETPROP] '%s' obj=%p val=%s meth=%s\n",
-										name.c_str(), obj, stack.top(0).to_xstring(), cur_meth);
-									fflush(stderr);
-								}
+								AVM2_TRACE_FPRINTF( "[GETPROP] '%s' obj=%p val=%s meth=%s\n",
+									name.c_str(), obj, stack.top(0).to_xstring(), cur_meth);
+								fflush(stderr);
 							}
+						}
 
 							IF_VERBOSE_ACTION(log_msg("EX: getproperty\t %s, value=%s\n", name.c_str(), stack.top(0).to_xstring()));
 						}
@@ -2519,7 +2664,7 @@ namespace gameswf
 					&& avm2_is_nonmethod_trait(obj, name.c_str()) == false
 					&& obj->is_getter_trait(name.c_str()) == false)
 				{
-					avm2_note_method_owner(obj, stack.top(0));
+					avm2_note_method_owner(obj, stack.top(0), name.c_str());
 				}
 
 					break;
@@ -2554,6 +2699,12 @@ namespace gameswf
 							}
 						}
 						obj->set_member(name, val);
+						if (strcmp(name, "instance") == 0)
+						{
+							AVM2_TRACE_FPRINTF( "[INITPROP-INST] '%s' = %s obj=%p meth=%s\n",
+								name, val.to_xstring(), obj, cur_meth);
+							fflush(stderr);
+						}
 					}
 
 					IF_VERBOSE_ACTION(log_msg("EX: initproperty\t 0x%p.%s=%s\n", obj, name, val.to_xstring()));
@@ -2945,6 +3096,10 @@ namespace gameswf
 					if (!caught)
 					{
 						// Unhandled exception - propagate up
+						fprintf(stderr, "[UNCAUGHT] method=%s m=%d ip=%d exc=%s\n",
+							cur_meth, m_method, ip,
+							exc.to_xstring());
+						fflush(stderr);
 						result->set_undefined();
 						return;
 					}
@@ -3701,14 +3856,22 @@ namespace gameswf
 							else if (val.is_bool()) expect = "Boolean";
 							else if (val.is_number()) expect = "Number";
 
-							// 1) real object instance: match along the prototype chain
-							if (val.is_object())
+// 1) real object instance: match along the prototype chain
+						if (val.is_object())
+						{
+							for (as_object* o = val.to_object(); o != NULL; o = o->get_proto())
 							{
-								for (as_object* o = val.to_object(); o != NULL; o = o->get_proto())
-								{
-									if (o == type) { result = true; break; }
-								}
+								if (o == type) { result = true; break; }
 							}
+							// Placed display objects are native and are not linked
+							// into the script class chain, so the walk above cannot
+							// reach MovieClip/Sprite/TextField.  Answer those from
+							// the display hierarchy instead.
+							if (!result)
+							{
+								result = avm2_display_instance_of(val.to_object(), type);
+							}
+						}
 
 							// 2) primitive (or primitive stored as an object): the value
 							//    belongs to its own class and to Object.  Without this
@@ -3931,6 +4094,9 @@ namespace gameswf
 					{
 						// Non-function objects (e.g. result of applytype like Vector.<Class>)
 						// Just re-push the object - it was already created (e.g. by applytype)
+						AVM2_TRACE_FPRINTF("[CONSTRUCT-ASIS] obj=%p (not a class) argc=%d\n",
+							(void*) cls_obj, arg_count);
+						fflush(stderr);
 						stack.push(ctor);
 					}
 					else
@@ -4309,9 +4475,15 @@ namespace gameswf
 					if (trait_name != NULL)
 					{
 						obj->m_members.get(trait_name, &ret);
+						AVM2_TRACE_FPRINTF( "[SLOTR] getslot=%d trait='%s' val=%s obj=%p meth='%s'\n",
+							slot_index, trait_name, ret.to_xstring(), (void*)obj, cur_meth);
+						fflush(stderr);
 					}
 					else
 					{
+						AVM2_TRACE_FPRINTF( "[SLOT_MISS] getslot=%d obj=%p meth=%s\n",
+							slot_index, (void*)obj, cur_meth);
+						fflush(stderr);
 						char slot_name[32];
 						snprintf(slot_name, sizeof(slot_name), "__slot_%d__", slot_index);
 						// Slot access should NOT walk the prototype chain.
@@ -4342,6 +4514,10 @@ namespace gameswf
 				if (obj)
 				{
 					const char* trait_name = avm2_slot_trait_name(m_abc.get_ptr(), m_trait, slot_index);
+					AVM2_TRACE_FPRINTF( "[SLOTW] slot=%d trait='%s' val=%s obj=%p meth=%s\n",
+						slot_index, trait_name != NULL ? trait_name : "(mangled)",
+						value.to_xstring(), (void*)obj, cur_meth);
+					fflush(stderr);
 					if (trait_name != NULL)
 					{
 						obj->set_member(trait_name, value);

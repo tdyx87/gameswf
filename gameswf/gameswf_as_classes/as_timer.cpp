@@ -3,6 +3,7 @@
 
 #include "gameswf/gameswf_as_classes/as_timer.h"
 #include "gameswf/gameswf_as_classes/as_event.h"
+#include <stdio.h>
 
 namespace gameswf
 {

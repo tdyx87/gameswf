@@ -64,6 +64,24 @@ namespace gameswf
 		}
 	}
 
+	void	sprite_hit_test_point(const fn_call& fn)
+	{
+		// AS3 DisplayObject.hitTestPoint(x, y, shapeFlag = false).
+		// x/y are stage coordinates; sprite_instance::hit_test() works in
+		// world (stage) space too.
+		fn.result->set_bool(false);
+		sprite_instance* sprite = cast_to<sprite_instance>(fn.this_ptr);
+		if (sprite == NULL)
+		{
+			return;
+		}
+		double x = fn.arg(0).to_number();
+		double y = fn.arg(1).to_number();
+		bool shape = fn.nargs >= 3 ? fn.arg(2).to_bool() : false;
+		bool hit = sprite->hit_test(x, y, shape);
+		fn.result->set_bool(hit);
+	}
+
 	void	sprite_start_drag(const fn_call& fn)
 	{
 		sprite_instance* sprite = sprite_getptr(fn);
@@ -121,20 +139,12 @@ namespace gameswf
 	void	sprite_play(const fn_call& fn)
 	{
 		sprite_instance* sprite = sprite_getptr(fn);
-		fprintf(stderr, "[SP] play this=%p id=%d name='%s'\n",
-			(void*) sprite, sprite != NULL ? sprite->get_id() : -999,
-			sprite != NULL ? sprite->get_name().c_str() : "-");
-		fflush(stderr);
 		sprite->set_play_state(character::PLAY);
 	}
 
 	void	sprite_stop(const fn_call& fn)
 	{
 		sprite_instance* sprite = sprite_getptr(fn);
-		fprintf(stderr, "[SP] stop this=%p id=%d name='%s'\n",
-			(void*) sprite, sprite != NULL ? sprite->get_id() : -999,
-			sprite != NULL ? sprite->get_name().c_str() : "-");
-		fflush(stderr);
 		sprite->set_play_state(character::STOP);
 	}
 

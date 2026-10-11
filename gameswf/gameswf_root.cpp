@@ -243,14 +243,36 @@ namespace gameswf
 
 		if (ms->m_x != ms->m_x_last || ms->m_y != ms->m_y_last)
 		{
-			if (active_entity != NULL)
+			// Flash dispatches mouseMove to the object under the cursor
+			// (e.target), honouring mouseEnabled/mouseChildren.  AS3 games
+			// gate drag logic on it ("if (e.target.name == zone)"), so
+			// target the deepest mouse-taking object rather than the
+			// pressed/claimed entity.  AS2 onMouseMove has its own global
+			// notify (m_mouse_listener) and is unaffected.
 			{
-				active_entity->on_event(event_id::MOUSE_MOVE);
-			}
-			else
-			if (topmost_entity != NULL)
-			{
-				topmost_entity->on_event(event_id::MOUSE_MOVE);
+				static character* s_last_move_te = NULL;
+				character* move_te = NULL;
+				if (m_movie->get_mouse_target(move_te, PIXELS_TO_TWIPS(ms->m_x), PIXELS_TO_TWIPS(ms->m_y)))
+				{
+					// deepest mouse-taking target found
+				}
+				else if (active_entity != NULL)
+				{
+					move_te = active_entity;
+				}
+				else
+				if (topmost_entity != NULL)
+				{
+					move_te = topmost_entity;
+				}
+				if (move_te != NULL)
+				{
+					if (move_te != s_last_move_te)
+					{
+						s_last_move_te = move_te;
+					}
+					move_te->on_event(event_id::MOUSE_MOVE);
+				}
 			}
 		}
 
@@ -542,6 +564,15 @@ namespace gameswf
 		int	x, y, buttons;
 		get_mouse_state( &x, &y, &buttons );
 
+		{
+			static int s_last_dx = -99999, s_last_dy = -99999;
+			if (x != s_last_dx || y != s_last_dy)
+			{
+				s_last_dx = x;
+				s_last_dy = y;
+			}
+		}
+
 		// ... in world coordinates (twips)
 		point worldMouse( PIXELS_TO_TWIPS(x), PIXELS_TO_TWIPS(y) );
 
@@ -742,22 +773,6 @@ namespace gameswf
 			return;
 		}
 
-		{
-			static int s_diag_left = -1;
-			if (s_diag_left < 0)
-			{
-				const char* e = getenv("GSW_DEBUG");
-				s_diag_left = (e && *e && strcmp(e, "0") != 0) ? 1000000000 : 60;
-			}
-			// NB: never post-decrement below 0 -- a negative value would look
-			// like "not initialised yet" and re-arm the cap on the next frame.
-			if (s_diag_left > 0)
-			{
-				s_diag_left--;
-				fprintf(stderr, "[DIAG] root::display() m_movie=%p visible=%d\n", m_movie.get_ptr(), m_movie->get_visible());
-			}
-		}
-
 		gameswf::render::begin_display(
 			m_background_color,
 			m_viewport_x0, m_viewport_y0,
@@ -878,6 +893,12 @@ namespace gameswf
 
 	bool root::is_avm2() const
 	{
+		// This can be reached with a torn-down root: player::~player()
+		// clears m_current_root before walking the heap.
+		if (this == NULL || m_def == NULL)
+		{
+			return false;
+		}
 		return m_def->m_is_avm2;
 	}
 

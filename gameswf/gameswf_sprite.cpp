@@ -16,6 +16,7 @@
 #include "gameswf/gameswf_sprite_def.h"
 #include "gameswf/gameswf_sprite.h"
 #include "gameswf/gameswf_as_sprite.h"
+#include "gameswf/gameswf_avm2.h"
 #include "gameswf/gameswf_text.h"
 #include "gameswf/gameswf_as_classes/as_string.h"
 #include "gameswf/gameswf_as_classes/as_array.h"
@@ -23,7 +24,7 @@
 // Timeline / event diagnostics used while debugging SWF playback.
 // Very verbose: keep compiled out unless actively debugging.
 #ifndef SPRITE_TRACE_ENABLED
-#define SPRITE_TRACE_ENABLED 1
+#define SPRITE_TRACE_ENABLED 0
 #endif
 
 #if SPRITE_TRACE_ENABLED
@@ -297,6 +298,84 @@ namespace gameswf
 	}
 
 
+	bool sprite_instance::get_mouse_flag(const char* name, bool def)
+	// Flash mouse flags (mouseEnabled / mouseChildren) are plain
+	// dynamic members written by the SWF.  Only an explicit boolean
+	// overrides the default; undefined/missing keeps Flash's default
+	// of "accepts mouse events".
+	{
+		as_value v;
+		if (get_member(name, &v) && v.is_bool())
+		{
+			return v.to_bool();
+		}
+		return def;
+	}
+
+
+	bool sprite_instance::get_mouse_target(character*& te, float x, float y)
+	// Deepest object under the point that takes mouse events (Flash
+	// semantics for MouseEvent's target).  Coords are in parent's frame,
+	// same as get_topmost_mouse_entity().  Returns true iff te != NULL.
+	{
+		te = NULL;
+		if (get_visible() == false)
+		{
+			return false;
+		}
+
+		bool enabled = get_mouse_flag("mouseEnabled", true);
+		bool children = get_mouse_flag("mouseChildren", true);
+
+		if (enabled == false && children == false)
+		{
+			// Fully transparent to the mouse: what's underneath shows through.
+			return false;
+		}
+
+		matrix m = get_matrix();
+		point p;
+		m.transform_by_inverse(&p, point(x, y));
+
+		if (children)
+		{
+			// Go backwards: higher objects win, as everywhere else.
+			int i, n = m_display_list.size();
+			for (i = n - 1; i >= 0; i--)
+			{
+				character* ch = m_display_list.get_character(i);
+				if (ch != NULL && ch->get_visible() && ch->get_mouse_target(te, p.m_x, p.m_y))
+				{
+					return true;
+				}
+			}
+		}
+
+		if (enabled == false)
+		{
+			// This level opts out; children (still scanned above) were
+			// the only possible targets and none claimed the point.
+			return false;
+		}
+
+		// No child claimed it: this sprite itself becomes the target
+		// when the point is within its bounds.  Bounds (bbox) rather
+		// than alpha: invisible-but-visible clips are valid Flash
+		// targets, e.g. drag-and-drop zone markers.
+		if (m_display_list.size() > 0)
+		{
+			rect bound;
+			get_bound(&bound);
+			if (bound.point_test((float) x, (float) y))
+			{
+				te = this;
+				return true;
+			}
+		}
+		return false;
+	}
+
+
 	// This code is very tricky and hard to get right.  It should
 	// only be changed when verified by an automated test.  Here
 	// is the procedure:
@@ -376,9 +455,9 @@ namespace gameswf
 			}
 
 			// Execute the current frame's tags.
-			// execute_frame_tags(0) already executed in dlist.cpp 
-			if (m_current_frame != prev_frame) 
-			{ 
+			// execute_frame_tags(0) already executed in dlist.cpp
+			if (m_current_frame != prev_frame)
+			{
 				// Macromedia Flash does not call remove display object tag
 				// for 1-st frame therefore we should do it for it :-)
 				if (m_current_frame == 0 && m_def->get_frame_count() > 1)
@@ -454,13 +533,6 @@ namespace gameswf
 			s_diag_all = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
 		}
 		const bool diag = (s_diag_all != 0) || (s_diag_count++ < 400);
-
-		if (get_id() == -1)
-		{
-			fprintf(stderr, "[RFR] execute_frame_tags frame=%d state_only=%d dlist_size=%d this=%p cur=%d\n",
-				frame, state_only, m_display_list.size(), this, m_current_frame);
-			fflush(stderr);
-		}
 
 		if (diag)
 		{
@@ -631,7 +703,8 @@ namespace gameswf
 		if (m_frame_script != NULL)
 		{
 			// run frame script once per frame
-			SPRITE_TRACE_FPRINTF( "[FRAMESCRIPT] RUN frame=%d this=%p name='%s'\n", m_current_frame, this, get_name().c_str());
+			SPRITE_TRACE_FPRINTF( "[FRAMESCRIPT] RUN frame=%d this=%p name='%s' meth=%d mname='%s'\n", m_current_frame, this, get_name().c_str(),
+				((as_3_function*) m_frame_script.get_ptr())->m_method, avm2_function_method_name(as_value(m_frame_script.get_ptr())));
 			// Pass no receiver: addFrameScript stores method closures that
 			// were bound when `this.method` was read (remembered in
 			// avm2_method_owners).  Passing the sprite rebinds them to the
@@ -772,28 +845,6 @@ namespace gameswf
 		{
 			// We're invisible, so don't display!
 			return;
-		}
-
-		{
-			// TEMP diagnostic: dump the root's display list every 30 frames.
-			static int s_dl_n = 0;
-			if (get_id() == -1 && (s_dl_n++ % 30) == 0)
-			{
-				fprintf(stderr, "[DLIST] root this=%p frame=%d play=%d size=%d:",
-					this, m_current_frame, (int) m_play_state, m_display_list.size());
-				for (int i = 0; i < m_display_list.size(); i++)
-				{
-					character* c = m_display_list.get_character(i);
-					if (c != NULL)
-					{
-						fprintf(stderr, " [d%d id%d '%s' v%d]",
-							c->get_depth(), c->get_id(),
-							c->get_name().c_str(), c->get_visible());
-					}
-				}
-				fprintf(stderr, "\n");
-				fflush(stderr);
-			}
 		}
 
 		// force advance just loaded (by loadMovie(...)) movie
@@ -1466,9 +1517,11 @@ namespace gameswf
 
 		// Flash bubbles mouse/keyboard interaction events from the object
 		// under the mouse up through its ancestors; per-frame and pointer
-		// tracking events stay on their target.
-		bool bubbles = strcmp(event_type, "mouseMove") != 0
-			&& strcmp(event_type, "mouseLeave") != 0
+		// tracking events stay on their target.  AS3 MouseEvent.mouseMove
+		// bubbles=true (unlike AS2 onMouseMove): drag handlers registered
+		// on a parent only see moves if the event climbs from the pressed
+		// child.
+		bool bubbles = strcmp(event_type, "mouseLeave") != 0
 			&& strcmp(event_type, "enterFrame") != 0
 			&& strcmp(event_type, "load") != 0
 			&& strcmp(event_type, "unload") != 0
@@ -1482,6 +1535,25 @@ namespace gameswf
 		event_obj->set_member("type", as_value(event_type));
 		event_obj->set_member("bubbles", as_value(bubbles));
 		event_obj->set_member("target", as_value(obj));
+
+		// MouseEvent coordinate fields.  Drag logic reads e.stageX/e.stageY
+		// (movement) and e.localX/e.localY (offset captured at press time).
+		character* coord_ch = cast_to<character>(obj);
+		root* coord_rt = coord_ch != NULL ? coord_ch->get_root() : NULL;
+		if (coord_rt != NULL)
+		{
+			int mx = 0, my = 0, mb = 0;
+			coord_rt->get_mouse_state(&mx, &my, &mb);
+			event_obj->set_member("stageX", as_value((double) mx));
+			event_obj->set_member("stageY", as_value((double) my));
+			// localX/localY are the mouse position in the target's local
+			// space (Flash: the object the event was dispatched on).
+			point a(PIXELS_TO_TWIPS(mx), PIXELS_TO_TWIPS(my));
+			point b;
+			coord_ch->get_world_matrix().transform_by_inverse(&b, a);
+			event_obj->set_member("localX", as_value(TWIPS_TO_PIXELS(b.m_x)));
+			event_obj->set_member("localY", as_value(TWIPS_TO_PIXELS(b.m_y)));
+		}
 		as_value event_val(event_obj.get_ptr());
 
 		bool any_called = false;
@@ -1524,9 +1596,10 @@ namespace gameswf
 							as_object* receiver = avm2_listener_bound_this(snapshot[i], level);
 							if (receiver != level)
 							{
-								SPRITE_TRACE_FPRINTF( "[EBOUND] fn=%p bound=%p level=%p type=%s\n",
+								SPRITE_TRACE_FPRINTF( "[EBOUND] fn=%p bound=%p level=%p type=%s meth='%s'\n",
 									(void*)listener.to_function(), (void*)receiver,
-									(void*)level, event_type);
+									(void*)level, event_type,
+									avm2_function_method_name(listener) != NULL ? avm2_function_method_name(listener) : "?");
 							}
 							env->push(event_val);
 							gameswf::call_method(listener, env, as_value(receiver), 1, env->get_top_index());
@@ -1568,6 +1641,16 @@ namespace gameswf
 			}
 			character* ch = cast_to<character>(level);
 			level = ch != NULL ? ch->get_parent() : NULL;
+		}
+
+		if (any_called == false
+			&& (strncmp(event_type, "mouse", 5) == 0 || strcmp(event_type, "click") == 0))
+		{
+			character* ch = cast_to<character>(obj);
+			SPRITE_TRACE_FPRINTF( "[NOLIS] type='%s' obj=%p id=%d name='%s'\n",
+				event_type, (void*) obj, ch != NULL ? ch->get_id() : -1,
+				ch != NULL ? ch->get_name().c_str() : "-");
+			fflush(stderr);
 		}
 
 		return any_called;

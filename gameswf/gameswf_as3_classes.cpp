@@ -6,6 +6,7 @@
 #include "gameswf/gameswf_abc.h"
 #include "gameswf/gameswf_as_classes/as_timer.h"
 #include "gameswf/gameswf_as_classes/as_event.h"
+#include "base/tu_timer.h"
 
 namespace gameswf
 {
@@ -33,9 +34,14 @@ namespace gameswf
 	// getTimer():int - Returns the number of milliseconds since the SWF started
 	static void as3_getTimer(const fn_call& fn)
 	{
-		// Return milliseconds since player started
-		// This is a simplified implementation
-		fn.result->set_int(0);  // TODO: Implement actual timer
+		// Player start time; first call anchors the clock.
+		static Uint32 s_start_ticks = 0;
+		Uint32 now = tu_timer::get_ticks();
+		if (s_start_ticks == 0)
+		{
+			s_start_ticks = now;
+		}
+		fn.result->set_int((int)(now - s_start_ticks));
 	}
 
 	// describeType(value:*):XML - Returns XML description of the value's type
@@ -293,6 +299,9 @@ namespace gameswf
 		utils_pkg->set_member("Dictionary", as_value(dictionary_class));
 
 		// getTimer, setInterval, setTimeout, etc.
+		// Also register on global: findpropstrict resolves unqualified
+		// imports (e.g. TweenLite's getTimer()) by bare name on the scope
+		// chain, which only sees global -- not flash.utils.
 		utils_pkg->set_member("getTimer", as_value(as3_getTimer));
 		utils_pkg->set_member("setInterval", as_value(gameswf::as3_setInterval));
 		utils_pkg->set_member("setTimeout", as_value(gameswf::as3_setTimeout));
@@ -302,6 +311,18 @@ namespace gameswf
 		utils_pkg->set_member("getDefinitionByName", as_value(as3_getDefinitionByName));
 		utils_pkg->set_member("getQualifiedClassName", as_value(as3_getQualifiedClassName));
 		utils_pkg->set_member("getQualifiedSuperclassName", as_value(as3_getQualifiedSuperclassName));
+
+		// Don't register setInterval/setTimeout/clearInterval/clearTimeout
+		// here: player::init already installs working implementations on
+		// global (as_global_setinterval/as_global_settimeout) before
+		// as3_init_classes runs, and these as_timer.cpp stubs (which never
+		// invoke the callback) would shadow them -- killing every delayed
+		// action the SWF schedules, e.g. skipBtn.visible = true.
+		global->set_member("getTimer", as_value(as3_getTimer));
+		global->set_member("describeType", as_value(as3_describeType));
+		global->set_member("getDefinitionByName", as_value(as3_getDefinitionByName));
+		global->set_member("getQualifiedClassName", as_value(as3_getQualifiedClassName));
+		global->set_member("getQualifiedSuperclassName", as_value(as3_getQualifiedSuperclassName));
 
 		flash_pkg->set_member("utils", as_value(utils_pkg));
 

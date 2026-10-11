@@ -22,6 +22,7 @@ namespace gameswf
 
 	void	as_global_movieclip_ctor(const fn_call& fn);
 	void	sprite_hit_test(const fn_call& fn);
+	void	sprite_hit_test_point(const fn_call& fn);
 	void	sprite_start_drag(const fn_call& fn);
 	void	sprite_stop_drag(const fn_call& fn);
 	void	sprite_play(const fn_call& fn);

@@ -46,6 +46,19 @@ namespace gameswf
 	exported_module as_value	avm2_listener_function_value(const as_value& listener);
 	exported_module as_object*	avm2_listener_bound_this(const as_value& listener, as_object* fallback);
 
+	// Receiver captured when a function-valued property was last read from
+	// an object (avm2_note_method_owner).  setTimeout-style schedulers use
+	// it to keep `this` for callbacks handed over as method references
+	// (`this.play`): during event dispatch the ambient environment target
+	// is the dispatching sprite, not the method's owner.  NULL when the
+	// method's owner is unknown.
+	exported_module as_object*	avm2_method_owner(const as_value& method);
+
+	// Debug aid: ABC method name for a listener function (as_3_function),
+	// NULL otherwise.  Lets dispatch logs identify WHICH controller method
+	// (OnMouseDown/OnMouseMove/...) ran instead of only its address.
+	exported_module const char*	avm2_function_method_name(const as_value& fn);
+
 	// Maps an event_id to the matching AS3 event type name (the string passed
 	// to addEventListener).  Returns NULL when there is no AS3 equivalent.
 	exported_module const char*	avm2_event_type_name(int event_id_code);

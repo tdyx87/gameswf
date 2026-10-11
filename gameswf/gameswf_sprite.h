@@ -136,6 +136,8 @@ namespace gameswf
 
 		virtual bool can_handle_mouse_event();
 		virtual bool get_topmost_mouse_entity( character * &te, float x, float y);
+		virtual bool get_mouse_target( character * &te, float x, float y);
+		bool get_mouse_flag( const char* name, bool def );
 		void advance(float delta_time);
 
 		virtual void	alive();

@@ -1035,6 +1035,9 @@ void as3_register_remaining_classes(player* player)
 
 		as_object* cm_class = new as_object(player);
 		cm_class->set_member("prototype", as_value(cm_proto.get_ptr()));
+		// Static constants (flash.ui.ContextMenu.MENU_SELECT etc.)
+		cm_class->set_member("MENU_SELECT", as_value("menuSelect"));
+		cm_class->set_member("MENU_ITEM_SELECT", as_value("menuItemSelect"));
 		global->set_member("ContextMenu", as_value(cm_class));
 		if (ui_pkg) ui_pkg->set_member("ContextMenu", as_value(cm_class));
 	}

@@ -167,7 +167,7 @@ namespace gameswf
 	{
 		for (int i = 0; i < array<as_value>::size(); i++)
 		{
-			as_object* obj = (*this)[i].to_object();
+			as_object* obj = (*this)[i].to_object_ref();
 			if (obj)
 			{
 				if (obj == this_ptr)
@@ -238,7 +238,11 @@ namespace gameswf
 	as_environment::as_environment(player* player) :
 		m_player(player)
 	{
-		if (player->get_root()->is_avm2())
+		// get_root() is NULL once the player destructor has cleared
+		// m_current_root; an environment built during teardown (e.g. by a
+		// stray getter invocation) must not dereference it.
+		root* r = player ? player->get_root() : NULL;
+		if (r != NULL && r->is_avm2())
 		{
 			// push '_global' into scope
 			m_scope.push(player->get_global());
@@ -863,7 +867,7 @@ namespace gameswf
 		// local vars
 		for (int i = 0, n = m_local_frames.size(); i < n; i++)
 		{
-			as_object* obj = m_local_frames[i].m_value.to_object();
+			as_object* obj = m_local_frames[i].m_value.to_object_ref();
 			if (obj)
 			{
 				if (obj == this_ptr)
@@ -886,7 +890,7 @@ namespace gameswf
 		// global register
 		for (int i = 0, n = GLOBAL_REGISTER_COUNT; i < n; i++)
 		{
-			as_object* obj = m_global_register[i].to_object();
+			as_object* obj = m_global_register[i].to_object_ref();
 			if (obj)
 			{
 				if (obj == this_ptr)
@@ -903,7 +907,7 @@ namespace gameswf
 		// local register
 		for (int i = 0, n = m_local_register.size(); i < n; i++)
 		{
-			as_object* obj = m_local_register[i].to_object();
+			as_object* obj = m_local_register[i].to_object_ref();
 			if (obj)
 			{
 				if (obj == this_ptr)

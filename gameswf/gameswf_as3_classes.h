@@ -7,6 +7,7 @@
 #include "gameswf/gameswf_object.h"
 #include "gameswf/gameswf_sprite.h"
 #include "gameswf/gameswf_player.h"
+#include "gameswf/gameswf_as_sprite.h"
 
 namespace gameswf
 {
@@ -75,7 +76,7 @@ namespace gameswf
 			target->set_member("getRect", as_value());
 			target->set_member("globalToLocal", as_value());
 			target->set_member("localToGlobal", as_value());
-			target->set_member("hitTestPoint", as_value());
+			target->set_member("hitTestPoint", sprite_hit_test_point);
 			target->set_member("hitTestObject", as_value());
 		}
 	};
@@ -116,9 +117,12 @@ namespace gameswf
 			target->set_member("hitArea", as_value());
 			target->set_member("dropTarget", as_value());
 
-			// Methods
-			target->set_member("startDrag", as_value());
-			target->set_member("stopDrag", as_value());
+			// Methods: real drag natives (character::drag_state on root),
+			// not undefined stubs.  Timeline sprites resolve these through
+			// get_builtin() first; the class-object members cover objects
+			// that only see the AS3 class prototype.
+			target->set_member("startDrag", sprite_start_drag);
+			target->set_member("stopDrag", sprite_stop_drag);
 		}
 	};
 

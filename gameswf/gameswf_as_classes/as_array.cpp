@@ -531,7 +531,7 @@ namespace gameswf
 		// clear display list
 		for (int i = 0; i < size(); i++)
 		{
-			as_object* obj = m_array[i].to_object();
+			as_object* obj = m_array[i].to_object_ref();
 			if (obj)
 			{
 				obj->clear_refs(visited_objects, this_ptr);

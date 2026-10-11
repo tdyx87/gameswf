@@ -174,6 +174,7 @@ namespace gameswf
 		map->add("toLowerCase", string_to_lowercase);
 		map->add("toUpperCase", string_to_uppercase);
 		map->add("charAt", string_char_at);
+		map->add("replace", string_replace);
 		map->add("length", as_value(string_length, as_value()));
 
 		// sprite_instance builtins
@@ -192,6 +193,7 @@ namespace gameswf
 		map->add("createEmptyMovieClip", sprite_create_empty_movieclip);
 		map->add("removeMovieClip", sprite_remove_movieclip);
 		map->add("hitTest", sprite_hit_test);
+		map->add("hitTestPoint", sprite_hit_test_point);
 		map->add("startDrag", sprite_start_drag);
 		map->add("stopDrag", sprite_stop_drag);
 		map->add("loadMovie", sprite_loadmovie);
@@ -233,7 +235,17 @@ namespace gameswf
 		map->add("getChildAt", sprite_get_child_at);
 		map->add("getChildByName", sprite_get_child_by_name);
 		map->add("getChildIndex", sprite_get_child_index);
-		map->add("numChildren", sprite_get_num_children);
+		// NB: numChildren is deliberately NOT registered here.  In AS3 it is
+		// a read-only *property*, and it is already in
+		// s_standard_property_map as M_AS3_NUMCHILDREN.  Listing it as a
+		// method as well made sprite_instance::get_member() return the
+		// native as_function instead of the count, because get_builtin()
+		// runs before the standard-property switch.  AVM2 reads it with
+		// getproperty (opcode 0x66), which does not invoke methods, so
+		// "for (i = 0; i < container.numChildren; i++)" silently became
+		// "i < <a function object>" and the loop body never ran.
+		// callproperty numChildren still resolves via the special case in
+		// the AVM2 callproperty handler.
 		map->add("contains", sprite_contains);
 		map->add("setChildIndex", sprite_set_child_index);
 		map->add("swapChildren", sprite_swap_children);

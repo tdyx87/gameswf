@@ -5,6 +5,7 @@
 #include "gameswf/gameswf_as_classes/as_array.h"
 #include "gameswf/gameswf_avm2.h"
 #include <stdio.h>
+#include <string>
 
 namespace gameswf
 {
@@ -80,19 +81,87 @@ static void urlloader_load(const fn_call& fn)
 	fn.this_ptr->set_member("bytesLoaded", as_value(0));
 	fn.this_ptr->set_member("bytesTotal", as_value(0));
 
-	// This build has no network, so the request can never complete.  Fire
-	// ioError synchronously: dispatching from inside load() means the AS3
-	// error listener is already attached (it is registered just before the
-	// call), so the application's error path runs instead of waiting for an
-	// event that would never arrive.
+	// This build has no network, so a request cannot reach the server.
+	//
+	// Offline escape hatch: set GAMESWF_URLLOADER_DIR to a directory holding
+	// captured responses.  The URL is flattened into a filename (everything
+	// that is not [A-Za-z0-9.] becomes '_'); if that file exists its content
+	// is delivered as `data` and a COMPLETE event is dispatched, so content
+	// that depends on a server response can still run.  Otherwise ioError is
+	// fired synchronously: dispatching from inside load() means the AS3 error
+	// listener is already attached (it is registered just before the call), so
+	// the application's error path runs instead of waiting for an event that
+	// would never arrive.
+	const char* evt_type = "ioError";
+	const char* text = "The URL cannot be loaded (offline)";
+	std::string body;
+
+	const char* offline_dir = getenv("GAMESWF_URLLOADER_DIR");
+	if (offline_dir != NULL && offline_dir[0] != '\0')
+	{
+		// Flatten a URL into a file name: everything outside [A-Za-z0-9.-]
+		// becomes '_'.  Trailing part is kept so long URLs stay unique.
+		struct local_flatten
+		{
+			static std::string run(const char* u)
+			{
+				std::string s;
+				for (const char* p = u; *p; ++p)
+				{
+					char c = *p;
+					bool keep = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+						|| (c >= '0' && c <= '9') || c == '.' || c == '-';
+					s += keep ? c : '_';
+				}
+				if (s.size() > 120) s = s.substr(s.size() - 120);
+				return s;
+			}
+		};
+
+		const char* u = url_val.to_string();
+
+		// URLs usually carry a per-session random parameter (rand=..., t=...),
+		// so also try the address without any query string.
+		std::string no_query(u);
+		std::string::size_type q = no_query.find('?');
+		if (q != std::string::npos) no_query = no_query.substr(0, q);
+
+		std::string candidates[2];
+		candidates[0] = std::string(offline_dir) + "/" + local_flatten::run(u);
+		candidates[1] = std::string(offline_dir) + "/" + local_flatten::run(no_query.c_str());
+
+		for (int ci = 0; ci < 2; ci++)
+		{
+			FILE* f = fopen(candidates[ci].c_str(), "rb");
+			if (f == NULL)
+			{
+				fprintf(stderr, "[URLLOAD] no offline file: %s\n", candidates[ci].c_str());
+				fflush(stderr);
+				continue;
+			}
+
+			char buf[4096];
+			size_t n;
+			while ((n = fread(buf, 1, sizeof(buf), f)) > 0) body.append(buf, n);
+			fclose(f);
+
+			fn.this_ptr->set_member("data", as_value(body.c_str()));
+			fn.this_ptr->set_member("bytesLoaded", as_value((int) body.size()));
+			fn.this_ptr->set_member("bytesTotal", as_value((int) body.size()));
+			evt_type = "complete";
+			text = "Loaded from offline cache";
+			break;
+		}
+	}
+
 	as_object* evt = new as_object(fn.get_player());
-	evt->set_member("type", as_value("ioError"));
+	evt->set_member("type", as_value(evt_type));
 	evt->set_member("bubbles", as_value(false));
 	evt->set_member("cancelable", as_value(false));
 	evt->set_member("target", as_value(fn.this_ptr));
-	evt->set_member("text", as_value("The URL cannot be loaded (offline)"));
+	evt->set_member("text", as_value(text));
 
-	fprintf(stderr, "[URLLOAD] url='%s' dispatch ioError\n", url_val.to_string());
+	fprintf(stderr, "[URLLOAD] url='%s' dispatch %s\n", url_val.to_string(), evt_type);
 	fflush(stderr);
 
 	as_environment local_env(fn.get_player());
@@ -489,6 +558,29 @@ static void capabilities_get_language(const fn_call& fn)
 // Registration function
 // ========================================================================
 
+// navigateToURL(request:URLRequest, window:String = null) : void
+// Headless build has no browser, so we just record the target.  This keeps
+// callpropvoid 'navigateToURL' from reporting a missing method.
+static void net_navigateToURL(const fn_call& fn)
+{
+	if (fn.nargs < 1) return;
+
+	tu_string url;
+	as_object* req = fn.arg(0).to_object();
+	if (req)
+	{
+		as_value u;
+		if (req->get_member("url", &u)) url = u.to_string();
+	}
+	if (url == "") url = fn.arg(0).to_string();
+
+	tu_string win;
+	if (fn.nargs >= 2) win = fn.arg(1).to_string();
+
+	IF_VERBOSE_ACTION(log_msg("navigateToURL: url='%s' window='%s'\n",
+		url.c_str(), win.c_str()));
+}
+
 void as3_register_net_media_ui_classes(player* player)
 {
 	as_object* global = player->get_global();
@@ -831,6 +923,12 @@ void as3_register_net_media_ui_classes(player* player)
 		cls->set_member("EXACT_FIT", as_value("exactFit"));
 		cls->set_member("NO_SCALE", as_value("noScale"));
 		global->set_member("StageScaleMode", as_value(cls));
+	}
+
+	// ===== navigateToURL =====
+	{
+		global->set_member("navigateToURL", as_value(net_navigateToURL));
+		if (net_pkg) net_pkg->set_member("navigateToURL", as_value(net_navigateToURL));
 	}
 }
 

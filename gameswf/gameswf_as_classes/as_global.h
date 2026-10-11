@@ -30,6 +30,13 @@ namespace gameswf
 		array<as_value> m_arg;
 		bool m_do_once;
 
+		// The GC is refcount-based and listener::m_listeners holds only
+		// weak_ptrs.  A timer registered from callpropvoid (return value
+		// discarded) therefore died before its first tick; m_keepalive is
+		// a self-reference released when the timer is consumed (do_once
+		// fire) or cleared, so it stays alive exactly while registered.
+		gc_ptr<as_object> m_keepalive;
+
 		// Unique id of a gameswf resource
 		enum { m_class_id = AS_TIMER };
 		virtual bool is(int class_id) const
@@ -45,6 +52,8 @@ namespace gameswf
 			m_do_once(false)
 		{
 		}
+
+		virtual ~as_timer();
 
 		virtual void advance(float delta_time);
 	};

@@ -59,7 +59,8 @@ namespace gameswf
 		// event handler may affects m_listeners using addListener & removeListener
 		// iterate through a copy of it
 		clone_listener listeners(m_listeners);
-		for (int i = 0, n = listeners.size(); i < n; i++)
+		int n = listeners.size();
+		for (int i = 0; i < n; i++)
 		{
 			listeners[i]->advance(delta_time);
 		}

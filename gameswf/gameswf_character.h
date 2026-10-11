@@ -226,6 +226,14 @@ namespace gameswf
 		//
 		virtual bool get_topmost_mouse_entity( character * &te, float x, float y) { return false; }
 
+		// Flash mouse target under a point (coords in parent's frame,
+		// twips): the deepest object that accepts mouse events.  Honours
+		// the AS3 mouseEnabled / mouseChildren flags: objects that are
+		// transparent to the mouse are skipped (the search continues with
+		// what is underneath), matching Flash's e.target semantics.
+		// Returns true iff te is set.
+		virtual bool get_mouse_target( character * &te, float x, float y) { te = NULL; return false; }
+
 		// The host app uses this to tell the movie where the
 		// user's mouse pointer is.
 		virtual void	get_mouse_state(int* x, int* y, int* buttons)

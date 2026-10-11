@@ -18,6 +18,7 @@
 #endif //TU_USE_SDL
 
 #include "gameswf/gameswf.h"
+#include "gameswf/gameswf_log.h"
 #include "gameswf/gameswf_types.h"
 #include "base/image.h"
 #include "base/utility.h"
@@ -1022,22 +1023,9 @@ struct render_handler_ogl : public gameswf::render_handler
 		// properly, color writing stays disabled and the screen appears black.
 		glColorMask(1, 1, 1, 1);
 
-		// TEST: Clear screen to bright red to verify GL context and swap work.
-		// If screen is still black, the issue is with context/swap, not rendering.
+		// Clear the background each frame before drawing.
 		glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT);
-
-		// DIAGNOSTIC: Read back a pixel to see if glClear actually took effect.
-		{
-			unsigned char pixel[4] = {0,0,0,0};
-			glReadPixels(viewport_x0 + viewport_width/2, viewport_y0 + viewport_height/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
-			GLenum rerr = glGetError();
-			fprintf(stderr, "[OGL_DIAG] After glClear(RED): pixel=(%d,%d,%d,%d) GLerr=%d\n",
-				pixel[0], pixel[1], pixel[2], pixel[3], rerr);
-			fprintf(stderr, "[OGL_DIAG] viewport=(%d,%d,%d,%d)\n",
-				viewport_x0, viewport_y0, viewport_width, viewport_height);
-			fflush(stderr);
-		}
 
 		g_diag_vp_x = viewport_x0;
 		g_diag_vp_y = viewport_y0;
@@ -1083,26 +1071,6 @@ struct render_handler_ogl : public gameswf::render_handler
 		glDisable(GL_TEXTURE_GEN_S);
 		glDisable(GL_TEXTURE_GEN_T);
 
-		// Clear the background, if background color has alpha > 0.
-		{
-			static int bg_diag = 0;
-			if (bg_diag < 3) {
-				fprintf(stderr, "[BG_DIAG] background_color=(%d,%d,%d,%d) m_a>0=%d x0=%.1f y0=%.1f x1=%.1f y1=%.1f\n",
-					background_color.m_r, background_color.m_g, background_color.m_b, background_color.m_a,
-					(background_color.m_a > 0) ? 1 : 0, x0, y0, x1, y1);
-				// Also check current GL matrix state
-				GLfloat proj[16], model[16];
-				glGetFloatv(GL_PROJECTION_MATRIX, proj);
-				glGetFloatv(GL_MODELVIEW_MATRIX, model);
-				fprintf(stderr, "[BG_DIAG] proj=[%.2f %.2f %.2f %.2f] model=[%.2f %.2f %.2f %.2f]\n",
-					proj[0], proj[5], proj[10], proj[15], model[0], model[5], model[10], model[15]);
-				GLint vp[4];
-				glGetIntegerv(GL_VIEWPORT, vp);
-				fprintf(stderr, "[BG_DIAG] viewport=(%d,%d,%d,%d)\n", vp[0], vp[1], vp[2], vp[3]);
-				fflush(stderr);
-				bg_diag++;
-			}
-		}
 		if (background_color.m_a > 0)
 		{
 			// Draw a big quad.
@@ -1113,22 +1081,9 @@ struct render_handler_ogl : public gameswf::render_handler
 			glVertex2f(x1, y1);
 			glVertex2f(x0, y1);
 			glEnd();
-			// Diagnostic: read pixel right after background quad
-			{
-				static int quad_diag = 0;
-				if (quad_diag < 3) {
-					unsigned char pixel[4] = {0,0,0,0};
-					glReadPixels(viewport_x0 + viewport_width/2, viewport_y0 + viewport_height/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
-					GLenum rerr = glGetError();
-					fprintf(stderr, "[QUAD_DIAG] After bg quad: pixel=(%d,%d,%d,%d) GLerr=%d\n",
-						pixel[0], pixel[1], pixel[2], pixel[3], rerr);
-					fflush(stderr);
-					quad_diag++;
-				}
-			}
 			GLenum err_after = glGetError();
 			if (err_after != GL_NO_ERROR) {
-				fprintf(stderr, "[OGL_BEGIN] GL error after quad: 0x%04X\n", err_after);
+				gameswf::log_error("ogl: begin_display GL error after quad 0x%04X\n", err_after);
 			}
 		}
 
@@ -1241,7 +1196,6 @@ struct render_handler_ogl : public gameswf::render_handler
 //#define MULTIPASS_ANTIALIASING
 
 		// DIAG: watch the viewport-center pixel; log a draw only when it changes.
-		const bool	d_diag = (g_mesh_diag_count < 4000);
 
 #ifdef NORMAL_RENDERING
 		// Set up current style.
@@ -1280,56 +1234,7 @@ struct render_handler_ogl : public gameswf::render_handler
 
 		glDisableClientState(GL_VERTEX_ARRAY);
 
-		if (d_diag)
-		{
-			unsigned char	px[4] = {0,0,0,0};
-			glReadPixels(g_diag_vp_x + g_diag_vp_w / 2, g_diag_vp_y + g_diag_vp_h / 2,
-				1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-			bool changed = (px[0] != g_last_center[0] || px[1] != g_last_center[1] || px[2] != g_last_center[2]);
-			// DIAG: for the first frames, log EVERY draw regardless of change,
-			// so we can see the full draw order with stencil/colormask state.
-			bool always = (g_mesh_diag_frames < 3);
-			if (changed || always)
-			{
-				g_last_center[0] = px[0]; g_last_center[1] = px[1]; g_last_center[2] = px[2];
-				float	d_minx = 1e30f, d_miny = 1e30f, d_maxx = -1e30f, d_maxy = -1e30f;
-				for (int i = 0; i < vertex_count; i++)
-				{
-					float	cx, cy;
-					#if TU_USES_FLOAT_AS_COORDINATE_COMPONENT
-						cx = ((const float*)coords)[i * 2];
-						cy = ((const float*)coords)[i * 2 + 1];
-					#else
-						cx = (float) ((const Sint16*) coords)[i * 2];
-						cy = (float) ((const Sint16*) coords)[i * 2 + 1];
-					#endif
-					gameswf::point	p;
-					m_current_matrix.transform(&p, gameswf::point(cx, cy));
-					if (p.m_x < d_minx) d_minx = p.m_x;
-					if (p.m_y < d_miny) d_miny = p.m_y;
-					if (p.m_x > d_maxx) d_maxx = p.m_x;
-					if (p.m_y > d_maxy) d_maxy = p.m_y;
-				}
-				const gameswf::rgba& c = m_current_styles[LEFT_STYLE].m_color;
-				GLint	st_ref = 0, st_func = 0;
-				glGetIntegerv(GL_STENCIL_REF, &st_ref);
-				glGetIntegerv(GL_STENCIL_FUNC, &st_func);
-				GLboolean cm[4];
-				glGetBooleanv(GL_COLOR_WRITEMASK, cm);
-				GLint st_en = glIsEnabled(GL_STENCIL_TEST);
-				fprintf(stderr, "[MESH] #%d shape=%d prim=0x%X verts=%d stage=(%.0f..%.0f, %.0f..%.0f) style_mode=%d color=(%d,%d,%d,%d) center->(%d,%d,%d) st=%d ref=%d func=0x%X cm=%d%d%d%d blend=%d\n",
-					g_mesh_diag_count, g_cur_shape_id, primitive_type, vertex_count,
-					d_minx, d_maxx, d_miny, d_maxy,
-					(int) m_current_styles[LEFT_STYLE].m_mode,
-					c.m_r, c.m_g, c.m_b, c.m_a,
-					px[0], px[1], px[2],
-					(int) st_en, st_ref, st_func,
-					cm[0], cm[1], cm[2], cm[3],
-					(int) glIsEnabled(GL_BLEND));
-				fflush(stderr);
-			}
-			g_mesh_diag_count++;
-		}
+		g_mesh_diag_count++;
 
 		glPopMatrix();
 #endif // NORMAL_RENDERING
@@ -1580,20 +1485,7 @@ struct render_handler_ogl : public gameswf::render_handler
 			glEnable(GL_STENCIL_TEST);
 			glClearStencil(0);
 			glClear(GL_STENCIL_BUFFER_BIT);
-			{
-				static bool s_bits_logged = false;
-				if (!s_bits_logged)
-				{
-					GLint bits = 0;
-					glGetIntegerv(GL_STENCIL_BITS, &bits);
-					fprintf(stderr, "[MASK] GL_STENCIL_BITS=%d\n", bits);
-					fflush(stderr);
-					s_bits_logged = true;
-				}
-			}
 		}
-		fprintf(stderr, "[MASK] begin level=%d stencil_test=%d\n", m_mask_level, (int) glIsEnabled(GL_STENCIL_TEST));
-		fflush(stderr);
 
 		// disable framebuffer writes
 		glColorMask(0, 0, 0, 0);
@@ -1603,7 +1495,8 @@ struct render_handler_ogl : public gameswf::render_handler
 		glStencilFunc(GL_EQUAL, m_mask_level++, 0xFF);
 		glStencilOp(GL_KEEP, GL_KEEP, GL_INCR); 
 		GLenum e = glGetError();
-		if (e != GL_NO_ERROR) fprintf(stderr, "  [OGL] begin_submit_mask: 0x%04X (level=%d)\n", e, m_mask_level-1);
+		static int s_begin_mask_errs = 0;
+		if (e != GL_NO_ERROR && ++s_begin_mask_errs <= 3) gameswf::log_error("ogl: begin_submit_mask GL error 0x%04X (level=%d)\n", e, m_mask_level-1);
 	}
 
 	// called after begin_submit_mask and the drawing of mask polygons
@@ -1615,10 +1508,9 @@ struct render_handler_ogl : public gameswf::render_handler
 		// we draw only where the stencil is m_mask_level (where the current mask was drawn)
 		glStencilFunc(GL_EQUAL, m_mask_level, 0xFF);
 		glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);	
-		fprintf(stderr, "[MASK] end level=%d\n", m_mask_level);
-		fflush(stderr);
 		GLenum e = glGetError();
-		if (e != GL_NO_ERROR) fprintf(stderr, "  [OGL] end_submit_mask: 0x%04X\n", e);
+		static int s_end_mask_errs = 0;
+		if (e != GL_NO_ERROR && ++s_end_mask_errs <= 3) gameswf::log_error("ogl: end_submit_mask GL error 0x%04X\n", e);
 	}
 
 	void disable_mask()
@@ -1628,7 +1520,8 @@ struct render_handler_ogl : public gameswf::render_handler
 		{
 			glDisable(GL_STENCIL_TEST); 
 			GLenum e = glGetError();
-			if (e != GL_NO_ERROR) fprintf(stderr, "  [OGL] disable_mask(stencil off): 0x%04X\n", e);
+		static int s_disable_mask_errs = 0;
+		if (e != GL_NO_ERROR && ++s_disable_mask_errs <= 3) gameswf::log_error("ogl: disable_mask(stencil off) GL error 0x%04X\n", e);
 			return;
 		}
 
@@ -1650,7 +1543,8 @@ struct render_handler_ogl : public gameswf::render_handler
 		glEnd();
 
 		GLenum e = glGetError();
-		if (e != GL_NO_ERROR) fprintf(stderr, "  [OGL] disable_mask(nested): 0x%04X\n", e);
+		static int s_nested_mask_errs = 0;
+		if (e != GL_NO_ERROR && ++s_nested_mask_errs <= 3) gameswf::log_error("ogl: disable_mask(nested) GL error 0x%04X\n", e);
 
 		end_submit_mask();
 	}

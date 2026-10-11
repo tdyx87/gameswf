@@ -152,6 +152,15 @@ namespace gameswf
 		exported_module void	lsr(int v) { set_int((Uint32(to_number()) >> v)); }
 
 		bool is_function() const;
+
+		// Reference-graph traversal (clear_refs).  Unlike to_object()
+		// this never invokes a PROPERTY getter: clear_refs() walks the
+		// whole heap from the player destructor, after m_current_root
+		// and m_global have been cleared, so calling back into script
+		// there would run AS3 against a half-destroyed player.  For a
+		// PROPERTY value the referenced object is its target, not the
+		// getter's result.
+		exported_module as_object*	to_object_ref() const;
 		inline bool is_bool() const { return m_type == BOOLEAN; }
 		inline bool is_string() const { return m_type == STRING; }
 		inline bool is_number() const { return m_type == NUMBER && isnan(m_number) == false; }

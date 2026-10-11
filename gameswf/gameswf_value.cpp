@@ -351,6 +351,26 @@ namespace gameswf
 		return NULL;
 	}
 
+	as_object*	as_value::to_object_ref() const
+	// Return the object this value holds, for reference-graph walks.
+	{
+		switch (m_type)
+		{
+			case OBJECT:
+				return m_object;
+
+			case PROPERTY:
+				// The getter's *result* is not what this slot references,
+				// and computing it would run user code.  The slot holds a
+				// reference to the property's target.
+				return m_property_target;
+
+			default:
+				break;
+		}
+		return NULL;
+	}
+
 	as_function*	as_value::to_function() const
 	// Return value as an function.
 	{

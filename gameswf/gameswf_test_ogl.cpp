@@ -334,8 +334,14 @@ int	main(int argc, char *argv[])
 		// -clk: scheduled clicks (repeatable); each is one press/release
 		// pair at movie coordinates on a given loop frame.
 		struct scheduled_click_t { int frame, x, y; };
-		scheduled_click_t	auto_clicks[8];
+		scheduled_click_t	auto_clicks[24];
 		int	auto_click_count = 0;
+		// -drag: scheduled drag gestures (repeatable); hover, press at
+		// (x1,y1) on <frame>, interpolate to (x2,y2) over <dur> frames
+		// while held, then release.
+		struct scheduled_drag_t { int frame, x1, y1, x2, y2, dur; };
+		scheduled_drag_t	auto_drags[12];
+		int	auto_drag_count = 0;
 		float	tex_lod_bias;
 		bool	force_realtime_framerate = false;
 
@@ -381,9 +387,9 @@ int	main(int argc, char *argv[])
 					fprintf(stderr, "-clk needs three args: <frame> <x> <y>\n");
 					exit(1);
 				}
-				if (auto_click_count >= 8)
+				if (auto_click_count >= 24)
 				{
-					fprintf(stderr, "-clk: too many clicks (max 8)\n");
+					fprintf(stderr, "-clk: too many clicks (max 24)\n");
 					exit(1);
 				}
 				auto_clicks[auto_click_count].frame = atoi(argv[arg + 1]);
@@ -391,6 +397,41 @@ int	main(int argc, char *argv[])
 				auto_clicks[auto_click_count].y = atoi(argv[arg + 3]);
 				auto_click_count++;
 				arg += 3;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-drag") == 0)
+			{
+				// Test hook: drag gesture.  Usage:
+				//   -drag <frame> <x1> <y1> <x2> <y2> [durFrames]
+				// Hover before <frame>, press at (x1,y1), move toward
+				// (x2,y2) over durFrames (default 15) while held, release.
+				if (arg + 5 >= argc)
+				{
+					fprintf(stderr, "-drag needs args: <frame> <x1> <y1> <x2> <y2> [dur]\n");
+					exit(1);
+				}
+				if (auto_drag_count >= 12)
+				{
+					fprintf(stderr, "-drag: too many drags (max 12)\n");
+					exit(1);
+				}
+				auto_drags[auto_drag_count].frame = atoi(argv[arg + 1]);
+				auto_drags[auto_drag_count].x1 = atoi(argv[arg + 2]);
+				auto_drags[auto_drag_count].y1 = atoi(argv[arg + 3]);
+				auto_drags[auto_drag_count].x2 = atoi(argv[arg + 4]);
+				auto_drags[auto_drag_count].y2 = atoi(argv[arg + 5]);
+				auto_drags[auto_drag_count].dur = 15;
+				if (arg + 6 < argc && argv[arg + 6][0] >= '0' && argv[arg + 6][0] <= '9')
+				{
+					auto_drags[auto_drag_count].dur = atoi(argv[arg + 6]);
+					arg += 6;
+				}
+				else
+				{
+					arg += 5;
+				}
+				auto_drag_count++;
 				continue;
 			}
 
@@ -1104,8 +1145,8 @@ int	main(int argc, char *argv[])
 							mouse_y = (int) (event.motion.y / scale_y);
 							break;
 
-						case SDL_MOUSEBUTTONDOWN:
-						case SDL_MOUSEBUTTONUP:
+					case SDL_MOUSEBUTTONDOWN:
+					case SDL_MOUSEBUTTONUP:
 							{
 								int	mask = 1 << (event.button.button - 1);
 								if (event.button.state == SDL_PRESSED)
@@ -1238,6 +1279,59 @@ int	main(int argc, char *argv[])
 				}
 			}
 
+			// Test hook (-drag): hover, press, interpolated move while
+			// held, release.  Independent of -clk.
+			if (auto_drag_count > 0)
+			{
+				static int s_drag_frame = 0;
+				s_drag_frame++;
+
+				for (int di = 0; di < auto_drag_count; di++)
+				{
+					const scheduled_drag_t& d = auto_drags[di];
+					int start = d.frame;
+					int dur = d.dur > 0 ? d.dur : 15;
+					int end = start + dur;
+
+					if (s_drag_frame >= start - 4 && s_drag_frame < start)
+					{
+						mouse_x = d.x1;
+						mouse_y = d.y1;
+					}
+					else if (s_drag_frame == start)
+					{
+						mouse_x = d.x1;
+						mouse_y = d.y1;
+						mouse_buttons = 1;
+						fprintf(stderr, "[DRAG] press at %d,%d loop_frame=%d\n",
+							mouse_x, mouse_y, s_drag_frame);
+						fflush(stderr);
+					}
+					else if (s_drag_frame > start && s_drag_frame <= end)
+					{
+						int step = s_drag_frame - start;
+						mouse_x = d.x1 + (d.x2 - d.x1) * step / dur;
+						mouse_y = d.y1 + (d.y2 - d.y1) * step / dur;
+						mouse_buttons = 1;
+						if (step == 1 || step == dur / 2 || step == dur)
+						{
+							fprintf(stderr, "[DRAG] move to %d,%d loop_frame=%d\n",
+								mouse_x, mouse_y, s_drag_frame);
+							fflush(stderr);
+						}
+					}
+					else if (s_drag_frame == end + 1)
+					{
+						mouse_x = d.x2;
+						mouse_y = d.y2;
+						mouse_buttons = 0;
+						fprintf(stderr, "[DRAG] release at %d,%d loop_frame=%d\n",
+							mouse_x, mouse_y, s_drag_frame);
+						fflush(stderr);
+					}
+				}
+			}
+
 			m->notify_mouse_state(mouse_x, mouse_y, mouse_buttons);
 
 				Uint32 t_advance = tu_timer::get_ticks();
@@ -1258,84 +1352,10 @@ int	main(int argc, char *argv[])
 
 			if (do_render)
 			{
-				// PRE-SWAP DIAGNOSTIC: Check framebuffer state
-				{
-					static int diag_count = 0;
-					if (diag_count < 5) {
-						GLint fbo_binding = 0, draw_buf = 0, read_buf = 0;
-						glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo_binding);
-						glGetIntegerv(GL_DRAW_BUFFER, &draw_buf);
-						glGetIntegerv(GL_READ_BUFFER, &read_buf);
-						// Check color mask
-						GLboolean cm[4];
-						glGetBooleanv(GL_COLOR_WRITEMASK, cm);
-						// Read a pixel right before swap
-						unsigned char pixel[4] = {0,0,0,0};
-						glReadPixels(width/2, height/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
-						GLenum rerr = glGetError();
-						fprintf(stderr, "[PRESWAP] FBO=%d DRAW=0x%X READ=0x%X ColorMask=%d%d%d%d pixel=(%d,%d,%d,%d) GLerr=%d\n",
-							fbo_binding, draw_buf, read_buf,
-							cm[0], cm[1], cm[2], cm[3],
-							pixel[0], pixel[1], pixel[2], pixel[3], rerr);
-						fprintf(stderr, "[PRESWAP] g_sdl_window=%p context=%p\n",
-							(void*)g_sdl_window, (void*)g_gl_context);
-						fflush(stderr);
-						diag_count++;
-					}
-				}
-
-				// DIAG: dump the framebuffer to a PPM so we can see the real frame.
-				{
-					extern int g_mesh_diag_frames;
-					static int s_fb_dumps = 0;
-					bool want = (g_mesh_diag_frames <= 3)
-						|| ((g_mesh_diag_frames % 60) == 0);
-					if (want && s_fb_dumps < 40)
-					{
-						s_fb_dumps++;
-						int nw = width, nh = height;
-						unsigned char* buf = new unsigned char[(size_t) nw * nh * 4];
-						glReadPixels(0, 0, nw, nh, GL_RGBA, GL_UNSIGNED_BYTE, buf);
-						char fn[256];
-						sprintf(fn, "temp/fb_%04d.ppm", g_mesh_diag_frames);
-						FILE* f = fopen(fn, "wb");
-						if (f)
-						{
-							fprintf(f, "P6\n%d %d\n255\n", nw, nh);
-							for (int y = nh - 1; y >= 0; y--)
-							{
-								const unsigned char* row = buf + (size_t) y * nw * 4;
-								for (int x = 0; x < nw; x++)
-								{
-									fputc(row[x * 4 + 0], f);
-									fputc(row[x * 4 + 1], f);
-									fputc(row[x * 4 + 2], f);
-								}
-							}
-							fclose(f);
-							fprintf(stderr, "[FBDUMP] %s\n", fn);
-						}
-						else
-						{
-							fprintf(stderr, "[FBDUMP] FAILED %s\n", fn);
-						}
-						delete[] buf;
-						fflush(stderr);
-					}
-				}
-
 				Uint32 t_swap = tu_timer::get_ticks();
 				glFinish();	// ensure all GL commands complete before swap
 				// Bypass SDL_GL_SwapBuffers macro - call SDL_GL_SwapWindow directly
 				SDL_GL_SwapWindow(g_sdl_window);
-				{
-					static int swap_count = 0;
-					if (swap_count < 3) {
-						fprintf(stderr, "[SWAP] SwapWindow called, g_sdl_window=%p\n", (void*)g_sdl_window);
-						fflush(stderr);
-						swap_count++;
-					}
-				}
 					t_swap = tu_timer::get_ticks() - t_swap;
 					//glPopAttrib ();
 

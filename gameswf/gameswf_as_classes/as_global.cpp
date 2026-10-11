@@ -8,6 +8,7 @@
 #include "gameswf/gameswf_log.h"
 #include "gameswf/gameswf_root.h"
 #include "as_global.h"
+#include <stdio.h>
 
 namespace gameswf
 {
@@ -45,13 +46,22 @@ namespace gameswf
 			gc_ptr<as_timer> t = new as_timer(fn.get_player());
 
 			int first_arg_index = 2;
-			if (fn.arg(0).is_function())
+		if (fn.arg(0).is_function())
+		{
+			t->m_func = fn.arg(0).to_function();
+			t->m_interval = fn.arg(1).to_float() / 1000.0f;
+			assert(fn.env);
+			// Prefer the receiver captured when the method was read
+			// (`this.play` handed to setTimeout): during event dispatch
+			// fn.env's target is the dispatching sprite, and the callback
+			// would later fire on that wrong object as a silent no-op.
+			as_object* receiver = avm2_method_owner(fn.arg(0));
+			if (receiver == NULL)
 			{
-				t->m_func = fn.arg(0).to_function();
-				t->m_interval = fn.arg(1).to_float() / 1000.0f;
-				assert(fn.env);
-				t->m_this_ptr = fn.env->get_target();
+				receiver = fn.env->get_target();
 			}
+			t->m_this_ptr = receiver;
+		}
 			else
 			if (fn.arg(0).to_object() != NULL)
 			{
@@ -79,6 +89,12 @@ namespace gameswf
 
 			fn.get_root()->add_listener(t);
 			fn.result->set_as_object(t);
+			// Keep the timer alive even when the caller discards the
+			// return value (callpropvoid): listener::m_listeners is weak.
+			t->m_keepalive = t.get_ptr();
+		}
+		else
+		{
 		}
 	}
 
@@ -94,13 +110,22 @@ namespace gameswf
 		{
 			t->m_do_once = true;
 		}
+		else
+		{
+		}
 	}
 
 	void  as_global_clearinterval(const fn_call& fn)
 	{
 		if (fn.nargs > 0)
 		{
-			fn.get_root()->remove_listener(fn.arg(0).to_object());
+			as_object* obj = fn.arg(0).to_object();
+			fn.get_root()->remove_listener(obj);
+			as_timer* t = cast_to<as_timer>(obj);
+			if (t)
+			{
+				t->m_keepalive = NULL;
+			}
 		}
 	}
 
@@ -211,7 +236,19 @@ namespace gameswf
 		{
 			m_time_remainder = fmod(m_time_remainder - m_interval, m_interval);
 
-			as_environment env(m_func->get_player());
+			// as_c_function instances built via as_value::set_as_c_function
+			// (e.g. `sprite_play` handed to setTimeout) carry a NULL player;
+			// fall back to the timer's own player so we never deref NULL.
+			player* p = m_func->get_player();
+			if (p == NULL)
+			{
+				p = get_player();
+			}
+			if (p == NULL || p->get_root() == NULL)
+			{
+				return;
+			}
+			as_environment env(p);
 			int n = m_arg.size();
 			{
 				for (int i = 0; i < n; i++)
@@ -219,18 +256,27 @@ namespace gameswf
 					env.push(m_arg[i]);
 				}
 			}
-
 			// keep alive
 			gc_ptr<as_object> obj = m_this_ptr.get_ptr();
 			as_value callback(m_func.get_ptr());
+
 
 			call_method(callback, &env, obj.get_ptr(), n, env.get_top_index());
 
 			if (m_do_once)
 			{
-				m_func->get_root()->remove_listener(this);
+				root* r = p->get_root();
+				if (r != NULL)
+				{
+					r->remove_listener(this);
+				}
+				m_keepalive = NULL;	// must be last: may free this
 			}
 		}
+	}
+
+	as_timer::~as_timer()
+	{
 	}
 
 

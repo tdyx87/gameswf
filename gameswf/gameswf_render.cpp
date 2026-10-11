@@ -73,10 +73,6 @@ namespace gameswf
 		{
 			static int bd_count = 0;
 			if (bd_count < 3) {
-				fprintf(stderr, "[RENDER] begin_display handler=%p bg=(%d,%d,%d,%d) viewport=(%d,%d,%d,%d) movie=(%f,%f,%f,%f)\n",
-					s_render_handler, background_color.m_r, background_color.m_g, background_color.m_b, background_color.m_a,
-					viewport_x0, viewport_y0, viewport_width, viewport_height,
-					x0, x1, y0, y1);
 				bd_count++;
 			}
 			if (s_render_handler)

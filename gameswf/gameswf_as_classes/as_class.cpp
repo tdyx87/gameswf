@@ -30,6 +30,85 @@ namespace gameswf
 		return false; // placeholder - actual search is in get_member below
 	}
 
+	// Default value of an uninitialized slot/const trait (AVM2 ABC
+	// encoding: vindex != 0 carries a literal default, otherwise the
+	// declared type decides: int/uint -> 0, Number -> NaN, Boolean ->
+	// false, `*` -> undefined, everything else -> null).
+	static void avm2_slot_default(abc_def* abc, traits_info* ti, as_value* val)
+	{
+		if (abc == NULL || ti == NULL)
+		{
+			val->set_undefined();
+			return;
+		}
+
+		int vindex = ti->trait_slot.m_vindex;
+		if (vindex > 0)
+		{
+			// Literal default; m_vkind is only read from the ABC when
+			// vindex != 0, so never touch it above.
+			switch (ti->trait_slot.m_vkind)
+			{
+				case 0x01:	// utf8 string
+					val->set_string(abc->get_string(vindex));
+					return;
+				case 0x03:	// signed integer
+					val->set_int(abc->get_integer(vindex));
+					return;
+				case 0x04:	// unsigned integer
+					if (vindex < (int)abc->m_uinteger.size())
+					{
+						val->set_int((int)abc->m_uinteger[vindex]);
+					}
+					else
+					{
+						val->set_int(0);
+					}
+					return;
+				case 0x06:	// double
+					val->set_double(abc->get_double(vindex));
+					return;
+				case 0x0A:	// false
+					val->set_bool(false);
+					return;
+				case 0x0B:	// true
+					val->set_bool(true);
+					return;
+				case 0x0C:	// null
+					val->set_null();
+					return;
+				default:	// 0x00 undefined, 0x08 namespace, unknown
+					val->set_undefined();
+					return;
+			}
+		}
+
+		// No literal default: fall back to the slot's declared type.
+		// type_name index 0 resolves to "" (untyped `*` slot).
+		const char* type = abc->get_multiname(ti->trait_slot.m_type_name);
+		if (type == NULL || type[0] == '\0' || strcmp(type, "*") == 0)
+		{
+			val->set_undefined();
+		}
+		else if (strcmp(type, "int") == 0 || strcmp(type, "uint") == 0)
+		{
+			val->set_int(0);
+		}
+		else if (strcmp(type, "Number") == 0)
+		{
+			val->set_nan();
+		}
+		else if (strcmp(type, "Boolean") == 0)
+		{
+			val->set_bool(false);
+		}
+		else
+		{
+			// String, Object, Class, Function, Array, XML, user classes.
+			val->set_null();
+		}
+	}
+
 	bool as_class::get_member( const tu_stringi & name, as_value * val )
 	{
 		// First try the base implementation (m_members + m_proto chain)
@@ -54,9 +133,18 @@ namespace gameswf
 			{
 				if ( ti->m_kind == traits_info::Trait_Slot )
 				{
-					as_object * object = new as_object( get_player() );
-					set_member( name, object );
-					val->set_as_object( object );
+					// Uninitialized static slot.  Return the declared/type
+					// default instead of fabricating a placeholder object:
+					// a bare placeholder is truthy, so lazy singletons like
+					// `MusicController.instance = MusicController.instance
+					// || new MusicController()` short-circuited the
+					// constructor and wrote the empty placeholder back
+					// through setproperty; every later isRunning()/
+					// getActiveChannel() call then missed on a bare object
+					// with no prototype.  Still return true so
+					// find_property() picks the class object as the owner
+					// and initproperty() inside a cinit lands here.
+					avm2_slot_default(m_class->m_abc.get_ptr(), ti, val);
 					return true;
 				}
 				else if ( ti->m_kind == traits_info::Trait_Const )
@@ -121,10 +209,6 @@ namespace gameswf
 			}
 		}
 
-		fprintf(stderr, "[CLASS_MISS] '%s' m_class=%p trait_count=%d\n",
-			name.c_str(), (void*)m_class.get_ptr(),
-			m_class != NULL ? (int)m_class->m_trait.size() : -1);
-		fflush(stderr);
 		return false;
 	}
 

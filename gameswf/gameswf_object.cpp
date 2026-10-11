@@ -430,7 +430,7 @@ namespace gameswf
 		for (stringx_hash<as_value>::iterator it = m_members.begin();
 			it != m_members.end(); ++it)
 		{
-			as_object* obj = it->second.to_object();
+			as_object* obj = it->second.to_object_ref();
 			if (obj)
 			{
 				if (obj == this_ptr)

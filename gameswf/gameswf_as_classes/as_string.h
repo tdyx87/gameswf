@@ -30,6 +30,7 @@ namespace gameswf
 	void string_to_lowercase(const fn_call& fn);
 	void string_to_uppercase(const fn_call& fn) ;
 	void string_char_at(const fn_call& fn);
+	void string_replace(const fn_call& fn);
 	void string_to_string(const fn_call& fn);
 	void string_length(const fn_call& fn);
 }

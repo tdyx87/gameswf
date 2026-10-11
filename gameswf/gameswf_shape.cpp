@@ -1327,59 +1327,6 @@ namespace gameswf
 				return;
 			}
 		}
-		{
-			static int sd_count = 0;
-			static int s_gsd_debug = -1;
-			extern int g_mesh_diag_frames;
-			if (s_gsd_debug < 0)
-			{
-				const char* de = getenv("GSW_DEBUG");
-				s_gsd_debug = (de && *de && strcmp(de, "0") != 0) ? 1 : 0;
-			}
-			if (s_gsd_debug && sd_count < 400 && g_mesh_diag_frames >= 200) {
-				matrix	world_mat = inst->get_world_matrix();
-				const rect& b = get_bound_local();
-				int nfill = m_fill_styles.size();
-				fprintf(stderr, "[SHAPE] #%d fr=%d id=%d name='%s' bound=(%.1f..%.1f, %.1f..%.1f) world=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f] fills=%d type0=%d c0=(%d,%d,%d,%d)\n",
-					sd_count, g_mesh_diag_frames, inst->get_id(), inst->get_name().c_str(),
-					b.m_x_min, b.m_x_max, b.m_y_min, b.m_y_max,
-					(float)world_mat.m_[0][0], (float)world_mat.m_[0][1], (float)world_mat.m_[0][2],
-					(float)world_mat.m_[1][0], (float)world_mat.m_[1][1], (float)world_mat.m_[1][2],
-					nfill,
-					nfill ? m_fill_styles[0].get_type() : -1,
-					nfill ? m_fill_styles[0].get_color().m_r : 0,
-					nfill ? m_fill_styles[0].get_color().m_g : 0,
-					nfill ? m_fill_styles[0].get_color().m_b : 0,
-					nfill ? m_fill_styles[0].get_color().m_a : 0);
-				fflush(stderr);
-				sd_count++;
-			}
-		}
-		static int shape_display_count = 0;
-		if (shape_display_count < 3) {
-			matrix	local_mat = inst->get_matrix();
-			matrix	world_mat = inst->get_world_matrix();
-			fprintf(stderr, "[SHAPE_DISP] id=%d parent=%p\n", inst->get_id(), inst->get_parent());
-			fprintf(stderr, "  local=[%f,%f,%f,%f,%f,%f]\n",
-				(float)local_mat.m_[0][0], (float)local_mat.m_[0][1], (float)local_mat.m_[0][2],
-				(float)local_mat.m_[1][0], (float)local_mat.m_[1][1], (float)local_mat.m_[1][2]);
-			fprintf(stderr, "  world=[%f,%f,%f,%f,%f,%f]\n",
-				(float)world_mat.m_[0][0], (float)world_mat.m_[0][1], (float)world_mat.m_[0][2],
-				(float)world_mat.m_[1][0], (float)world_mat.m_[1][1], (float)world_mat.m_[1][2]);
-			// Walk parent chain
-			const character* cur = inst->get_parent();
-			int depth = 0;
-			while (cur && depth < 5) {
-				const matrix& pm = cur->get_matrix();
-				fprintf(stderr, "  parent[%d] id=%d name='%s' mat=[%f,%f,%f,%f,%f,%f]\n",
-					depth, cur->get_id(), cur->get_name().c_str(),
-					(float)pm.m_[0][0], (float)pm.m_[0][1], (float)pm.m_[0][2],
-					(float)pm.m_[1][0], (float)pm.m_[1][1], (float)pm.m_[1][2]);
-				cur = cur->get_parent();
-				depth++;
-			}
-			shape_display_count++;
-		}
 
 		matrix	mat = inst->get_world_matrix();
 		cxform	cx = inst->get_world_cxform();
