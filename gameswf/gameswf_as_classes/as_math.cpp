@@ -97,6 +97,18 @@ namespace gameswf
 		math_obj->builtin_member("sqrt1_2", 0.7071067811865475244);
 		math_obj->builtin_member("sqrt2", 1.4142135623730950488);
 
+		// AS3 uppercase constants (Math.PI, Math.E, ...).  AVM2 code uses
+		// these (e.g. the Elastic easing class reads Math.PI); with only the
+		// AS2 lowercase names getproperty PI returned undefined.
+		math_obj->builtin_member("E", 2.7182818284590452354);
+		math_obj->builtin_member("LN10", 2.30258509299404568402);
+		math_obj->builtin_member("LN2", 0.69314718055994530942);
+		math_obj->builtin_member("LOG10E", 0.43429448190325182765);
+		math_obj->builtin_member("LOG2E", 1.4426950408889634074);
+		math_obj->builtin_member("PI", 3.14159265358979323846);
+		math_obj->builtin_member("SQRT1_2", 0.7071067811865475244);
+		math_obj->builtin_member("SQRT2", 1.4142135623730950488);
+
 		// math methods
 		math_obj->builtin_member("abs", math_fabs);
 		math_obj->builtin_member("acos", math_acos);

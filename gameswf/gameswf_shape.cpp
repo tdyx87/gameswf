@@ -866,7 +866,24 @@ namespace gameswf
 			// Dump meshes into renderer, one mesh per style.
 			for (int i = 0; i < l.m_meshes.size(); i++) {
 				if (l.m_meshes[i]) {
-					l.m_meshes[i]->display(fills[i], 1.0f, bm);
+					// The mesh array is grown to fit the highest fill style
+					// index the shape records refer to, which is not
+					// necessarily within the style list we actually parsed.
+					// Indexing out of range would hand the renderer a
+					// garbage fill_style (random type and colour).
+					if (i < (int) fills.size()) {
+						l.m_meshes[i]->display(fills[i], 1.0f, bm);
+					}
+					else {
+						render::fill_style_disable(0);
+						static int s_oob_fill = 0;
+						if (s_oob_fill < 20)
+						{
+							s_oob_fill++;
+							log_error("fill style index %d out of range (%d styles)\n",
+								i, (int) fills.size());
+						}
+					}
 				}
 			}
 
@@ -874,7 +891,19 @@ namespace gameswf
 			{for (int i = 0; i < l.m_line_strips.size(); i++)
 			{
 				int	style = l.m_line_strips[i]->get_style();
-				l.m_line_strips[i]->display(line_styles[style], 1.0f);
+				if (style < (int) line_styles.size()) {
+					l.m_line_strips[i]->display(line_styles[style], 1.0f);
+				}
+				else {
+					render::line_style_disable();
+					static int s_oob_line = 0;
+					if (s_oob_line < 20)
+					{
+						s_oob_line++;
+						log_error("line style index %d out of range (%d styles)\n",
+							style, (int) line_styles.size());
+					}
+				}
 			}}
 		}
 	}
@@ -1336,46 +1365,45 @@ namespace gameswf
 		switch(inst->get_blend_mode())
 		{
 		case 0:
-		case 1:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_NORMAL);
 			break;
-		case 2:
+		case 1:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_LAYER);
 			break;
-		case 3:
+		case 2:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_MULTIPLY);
 			break;
-		case 4:
+		case 3:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_SCREEN);
 			break;
-		case 5:
+		case 4:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_LIGHTEN);
 			break;
-		case 6:
+		case 5:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_DARKEN);
 			break;
-		case 7:
+		case 6:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_DIFFERENCE);
 			break;
-		case 8:
+		case 7:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_ADD);
 			break;
-		case 9:
+		case 8:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_SUBTRACT);
 			break;
-		case 10:
+		case 9:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_INVERT);
 			break;
-		case 11:
+		case 10:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_ALPHA);
 			break;
-		case 12:
+		case 11:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_ERASE);
 			break;
-		case 13:
+		case 12:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_OVERLAY);
 			break;
-		case 14:
+		case 13:
 			display(mat, cx, pixel_scale, m_fill_styles, m_line_styles, render_handler::BLEND_HARDLIGHT);
 			break;
 		default:

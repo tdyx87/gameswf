@@ -1380,13 +1380,13 @@ namespace gameswf
 				m_depth = in->read_u16();
 				IF_VERBOSE_PARSE(log_msg("  depth = %d\n", m_depth));
 
-				if (has_char)
-				{
-					m_character_id = in->read_u16();
-					IF_VERBOSE_PARSE(log_msg("  char id = %d\n", m_character_id));
-				}
+			if (has_char)
+			{
+				m_character_id = in->read_u16();
+IF_VERBOSE_PARSE(log_msg("  char id = %d\n", m_character_id));
+			}
 
-				if (has_matrix)
+			if (has_matrix)
 				{
 					m_has_matrix = true;
 					m_matrix.read(in);
@@ -1764,15 +1764,15 @@ namespace gameswf
 		{
 			assert(tag_type == 5 || tag_type == 28);
 
-			if (tag_type == 5)
-			{
-				// Older SWF's allow multiple objects at the same depth;
-				// this m_id disambiguates.  Later SWF's just use one
-				// object per depth.
-				m_id = in->read_u16();
-			}
-			m_depth = in->read_u16();
+		if (tag_type == 5)
+		{
+			// Older SWF's allow multiple objects at the same depth;
+			// this m_id disambiguates.  Later SWF's just use one
+			// object per depth.
+			m_id = in->read_u16();
 		}
+		m_depth = in->read_u16();
+	}
 
 		virtual void execute(character* m)
 		{
@@ -2166,7 +2166,7 @@ namespace gameswf
 		uv_coords.m_y_max = 1.0f;
 
 		cxform cx = ch->get_world_cxform();
-		rgba color = cx.transform(gameswf::rgba());
+		rgba color = cx.transform(gameswf::rgba(255, 255, 255, 255));
 		matrix m = ch->get_world_matrix();
 		render::draw_bitmap(m, m_bitmap_info.get_ptr(), coords,	uv_coords, color);
 	}

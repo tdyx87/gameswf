@@ -281,6 +281,51 @@ namespace gameswf
 		}
 	}
 
+	// Convert an AVM2 option_detail (declared parameter default) to an as_value.
+	// vkind is the CONSTANT_* tag; vindex is the pool index (or literal for null-ish tags).
+	static void avm2_option_default_value(abc_def* abc, int vindex, Uint8 vkind, as_value& val)
+	{
+		if (abc == NULL || vindex <= 0)
+		{
+			val.set_undefined();
+			return;
+		}
+		switch (vkind)
+		{
+			case 0x01:	// utf8 string
+				val.set_string(abc->get_string(vindex));
+				break;
+			case 0x03:	// signed integer
+				val.set_int(abc->get_integer(vindex));
+				break;
+			case 0x04:	// unsigned integer
+				if (vindex < (int)abc->m_uinteger.size())
+				{
+					val.set_int((int)abc->m_uinteger[vindex]);
+				}
+				else
+				{
+					val.set_int(0);
+				}
+				break;
+			case 0x06:	// double
+				val.set_double(abc->get_double(vindex));
+				break;
+			case 0x0A:	// false
+				val.set_bool(false);
+				break;
+			case 0x0B:	// true
+				val.set_bool(true);
+				break;
+			case 0x0C:	// null
+				val.set_null();
+				break;
+			default:	// 0x00 undefined, 0x08 namespace, unknown
+				val.set_undefined();
+				break;
+		}
+	}
+
 	// Resolve a slot id to the name declared by the running method's body
 	// traits (activation slots).  Storing activation slots under their real
 	// names is what lets getlex/findpropstrict inside a closure created by
@@ -833,10 +878,29 @@ namespace gameswf
 			//const char* name = m_abc->get_multiname(m_param_type[i]);
 			local_register[i + 1] = fn.arg( i );
 		}
-		// Fill remaining registers with undefined
-		for (int i = actual_arg_count; i < (int)m_param_type.size(); i++)
+		// Fill remaining registers with the declared default values
+		// (option_detail), or undefined when no default exists.  Missing
+		// this left optional params undefined even when the ABC declared a
+		// default (e.g. setGameDate's factoryName = "progressBar"), so
+		// getChildByName(undefined) returned null and the progress bar
+		// updates in __nextGame/playGme/__progressChange were all skipped.
+		int param_count = (int)m_param_type.size();
+		int option_count = (int)m_options.size();
+		for (int i = actual_arg_count; i < param_count; i++)
 		{
-			local_register[i + 1] = as_value();
+			// options[] covers the last option_count parameters.
+			int opt_index = i - (param_count - option_count);
+			if (opt_index >= 0 && opt_index < option_count)
+			{
+				avm2_option_default_value(m_abc.get_ptr(),
+					m_options[opt_index].m_value,
+					m_options[opt_index].m_kind,
+					local_register[i + 1]);
+			}
+			else
+			{
+				local_register[i + 1] = as_value();
+			}
 		}
 
 #ifdef __GAMESWF_ENABLE_JIT__
@@ -911,6 +975,33 @@ namespace gameswf
 
 	}
 
+	// Call-chain tracking: which as_3_function invoked the currently
+	// executing one.  Used to trace who calls methods with a wrong
+	// receiver (e.g. 'this' = global instead of the doc instance).
+	static int s_avm2_caller_m = -1;
+	static char s_avm2_caller_nm[64] = "?";
+
+	struct avm2_call_frame
+	{
+		int m_prev_m;
+		char m_prev_nm[64];
+		avm2_call_frame(int meth, const char* name)
+		{
+			m_prev_m = s_avm2_caller_m;
+			strncpy(m_prev_nm, s_avm2_caller_nm, sizeof(m_prev_nm) - 1);
+			m_prev_nm[sizeof(m_prev_nm) - 1] = 0;
+			s_avm2_caller_m = meth;
+			strncpy(s_avm2_caller_nm, name ? name : "?", sizeof(s_avm2_caller_nm) - 1);
+			s_avm2_caller_nm[sizeof(s_avm2_caller_nm) - 1] = 0;
+		}
+		~avm2_call_frame()
+		{
+			s_avm2_caller_m = m_prev_m;
+			strncpy(s_avm2_caller_nm, m_prev_nm, sizeof(s_avm2_caller_nm) - 1);
+			s_avm2_caller_nm[sizeof(s_avm2_caller_nm) - 1] = 0;
+		}
+	};
+
 	// interperate action script bytecode
 	void	as_3_function::execute(array<as_value>& lregister, as_environment* env, as_value* result)
 	{
@@ -957,6 +1048,12 @@ namespace gameswf
 			const char* n2 = m_abc->get_multiname(m_name);
 			if (n2) cur_meth = n2;
 		}
+
+		AVM2_TRACE_FPRINTF( "[AVM2CALL] enter m=%d(%s) caller=m=%d(%s) this=%s\n",
+			m_method, cur_meth, s_avm2_caller_m, s_avm2_caller_nm,
+			lregister.size() > 0 ? lregister[0].to_xstring() : "?");
+		fflush(stderr);
+		avm2_call_frame _call_frame(m_method, cur_meth);
 
 		int ip = 0;
 		do
@@ -1478,10 +1575,12 @@ namespace gameswf
 					{
 						found = obj->find_property(name, &func);
 					}
-					if (strcmp(name, "URLLoader") == 0 || strcmp(name, "URLRequest") == 0)
+					if (strcmp(name, "URLLoader") == 0 || strcmp(name, "URLRequest") == 0
+						|| strcmp(name, "LocalConnection") == 0 || strcmp(name, "ContextMenu") == 0)
 					{
-						AVM2_TRACE_FPRINTF( "[CPC] '%s' obj=%p found=%d func=%s func_obj=%p\n",
+						AVM2_TRACE_FPRINTF( "[CPC] '%s' obj=%p found=%d func=%s isfn=%d func_obj=%p\n",
 							name, obj, (int)found, func.to_xstring(),
+							(int) func.is_function(),
 							func.is_object() ? func.to_object() : NULL);
 						fflush(stderr);
 					}
@@ -1493,7 +1592,31 @@ namespace gameswf
 						if (strcmp(name, "Array") == 0)
 						{
 							is_display_object = false;
-							new_object = new as_array(get_player());
+							as_array* ao = new as_array(get_player());
+							new_object = ao;
+
+							// AS3's "Array" on _global is a plain class object with no
+							// constructor body, so the ctor lookup further down never
+							// consumes the initializer arguments and `new Array(a, b)`
+							// silently came back EMPTY -- every a[i] then read back as
+							// undefined (this is what left the show screen's outfit
+							// array unusable).  Seed the elements here, mirroring
+							// as_global_array_ctor for the AS2 path.
+							if (arg_count > 0)
+							{
+								if (arg_count == 1 && env.bottom(env.get_top_index()).is_number())
+								{
+									// new Array(n) -> an array of length n
+									ao->resize(env.bottom(env.get_top_index()).to_int());
+								}
+								else
+								{
+									for (int ai = 0; ai < arg_count; ai++)
+									{
+										ao->push(env.bottom(env.get_top_index() - ai));
+									}
+								}
+							}
 						}
 						else if (strcmp(name, "Object") == 0)
 						{
@@ -1727,6 +1850,36 @@ namespace gameswf
 
 					// Call the constructor if we have one
 					as_function* ctor = m_abc->get_class_constructor(name);
+					if (ctor == NULL)
+					{
+						// Builtin class registered as a plain constructor
+						// function on _global (e.g. LocalConnection): there is
+						// no ABC class for it, so run the builtin ctor on the
+						// fresh object.  Without this the object was returned
+						// empty (LocalConnection.domain was missing).  NOTE:
+						// find_property(name) yields the OWNER object, so the
+						// class value must be resolved with get_member.
+						as_value ctor_val;
+						if (obj && obj->get_member(name, &ctor_val)
+							&& ctor_val.is_function())
+						{
+							ctor = ctor_val.to_function();
+						}
+					}
+					if (ctor == NULL && new_object != NULL)
+					{
+						// Class-like builtin object (ContextMenu & friends):
+						// the class object carries a "constructor" function
+						// member and the new instance's proto chain reaches
+						// it.  Run it so instance members (customItems, ...)
+						// get attached.
+						as_value ctor_val;
+						if (new_object->get_member("constructor", &ctor_val)
+							&& ctor_val.is_function())
+						{
+							ctor = ctor_val.to_function();
+						}
+					}
 					if (ctor)
 					{
 						// Must be the index of arg1 inside env (like every
@@ -2166,21 +2319,18 @@ namespace gameswf
 						}
 					}
 
-					//Search for a script entry to execute
-					if (obj == NULL)
-					{
-						as_function* func = m_abc->get_script_function(name);
-						if (func != NULL)
-						{
-							get_global()->set_member( name, new as_object( get_player() ) );
-
-							as_environment env( get_player() );
-
-							call_method( func, &env, get_global(), 0, 0 );
-
-							obj = get_global();
-						}
-					}
+					// NOTE: no "call the class constructor" fallback here.
+					// get_script_function(name) returns the class's iinit
+					// (constructor); invoking it with the global object as
+					// 'this' is wrong on every level -- findpropstrict never
+					// runs constructors, and the constructor's `this.__x`
+					// reads (e.g. ProgressBar's __showMenu) then hit the
+					// global object and failed.  If the class isn't defined
+					// yet, the script init that defines it is either already
+					// running (it registers the class at its end via
+					// initproperty) or the lazy-init path above has just run
+					// it.  The final fallback below pushes an object that
+					// owns the property, which is all findpropstrict needs.
 					IF_VERBOSE_ACTION(log_msg("EX: findpropstrict\t %s, obj=0x%p\n", name, obj));
 
 					if (obj == NULL)
@@ -2316,21 +2466,22 @@ namespace gameswf
 
 					if(val.is_undefined())
 					{
-					as_function* func = m_abc->get_script_function(name);
-					if (func != NULL)
+					// NOTE: get_script_function(name) returns the class's
+					// iinit (constructor).  The old fallback here INVOKED it
+					// with the global object as 'this' -- a constructor is
+					// never called that way (AVM2: constructprop with a new
+					// object), and ProgressBar's ctor doing
+					// `eventListener.add(GameType.MENU_CHANGE, this.__showMenu)`
+					// then failed with GPF_MISS on global ("the menu is not
+					// exist").  If the class is still undefined here its
+					// defining script init is already running and will
+					// register the class via initproperty; until then
+					// undefined is the correct value.
+					if (m_abc->get_script_function(name) != NULL)
 					{
-							gc_ptr<as_object> object = new as_object( get_player() );
-							get_global()->set_member(name, object.get());
-							AVM2_TRACE_FPRINTF("[GETLEXFB] '%s' placeholder obj=%p\n",
-								name, (void*) object.get_ptr());
-							fflush(stderr);
-
-								as_environment env( get_player() );
-
-								call_method( func, &env, get_global(), 0, 0 );
-
-								val.set_as_object(object);
-						}
+						AVM2_TRACE_FPRINTF("[GETLEXFB] '%s' class pending (no ctor call)\n", name);
+						fflush(stderr);
+					}
 					}
 
 					if (val.is_function())
@@ -4083,6 +4234,15 @@ namespace gameswf
 						new_object->set_instance(ii);
 						new_object->m_proto = cls_obj;
 
+						// Materialize instance slot defaults before the
+						// constructor body runs.  Without this, a class whose
+						// lazy singleton is built via `construct` (0x42, e.g.
+						// ShakeHelp.instance) never gets its declared slot
+						// defaults (m_swec1/m_swec2/m_swxs), so they stay
+						// undefined and the per-frame shake math yields NaN
+						// rotation.  constructprop (0x4A) already does this.
+						avm2_seed_instance_slots(new_object.get_ptr(), ii);
+
 						as_function* c = class_name ? m_abc->get_class_constructor(tu_string(class_name)) : NULL;
 						if (c)
 						{
@@ -4092,12 +4252,43 @@ namespace gameswf
 					}
 					else if (cls_obj != NULL)
 					{
-						// Non-function objects (e.g. result of applytype like Vector.<Class>)
-						// Just re-push the object - it was already created (e.g. by applytype)
-						AVM2_TRACE_FPRINTF("[CONSTRUCT-ASIS] obj=%p (not a class) argc=%d\n",
-							(void*) cls_obj, arg_count);
-						fflush(stderr);
-						stack.push(ctor);
+						// Class-like builtin object (registered via
+						// create_class / set_member("prototype", ...)):
+						// `new Foo()` must create a fresh instance whose
+						// proto chain reaches the class's prototype, then run
+						// the class's "constructor" member if it has one.
+						// Returning the class object itself (old behavior)
+						// broke e.g. ContextMenu: the instance had no
+						// customItems and statics were read off instances.
+						as_value proto_val;
+						as_object* proto = NULL;
+						if (cls_obj->get_member("prototype", &proto_val))
+						{
+							proto = proto_val.to_object();
+						}
+						if (proto != NULL)
+						{
+							gc_ptr<as_object> inst = new as_object(get_player());
+							inst->m_proto = proto;
+
+							as_value ctor_val;
+							if (cls_obj->get_member("constructor", &ctor_val)
+								&& ctor_val.is_function())
+							{
+								call_method(ctor_val.to_function(), &env,
+									inst.get_ptr(), arg_count, env.get_top_index());
+							}
+							stack.push(inst.get_ptr());
+						}
+						else
+						{
+							// Non-class object (e.g. result of applytype like
+							// Vector.<Class>): just re-push it.
+							AVM2_TRACE_FPRINTF("[CONSTRUCT-ASIS] obj=%p (not a class) argc=%d\n",
+								(void*) cls_obj, arg_count);
+							fflush(stderr);
+							stack.push(ctor);
+						}
 					}
 					else
 					{
@@ -5578,6 +5769,16 @@ namespace gameswf
 
 		IF_VERBOSE_PARSE(log_msg("method	%i\n", m_method));
 		IF_VERBOSE_PARSE(log_disasm_avm2(m_code, m_abc.get_ptr()));
+
+		{
+			if (getenv("GAMESWF_DUMP_ALL_METHODS") != NULL)
+			{
+				set_verbose_parse(true);
+				log_msg("===== DISASM method %d codelen=%d =====\n", m_method, m_code.size());
+				log_disasm_avm2(m_code, m_abc.get_ptr());
+				set_verbose_parse(false);
+			}
+		}
 
 	}
 

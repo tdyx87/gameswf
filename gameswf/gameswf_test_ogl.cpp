@@ -313,6 +313,47 @@ static void	fs_callback(gameswf::character* movie, const char* command, const ch
 
 }
 
+	struct aim_cache_t { char name[64]; int x, y; };
+static aim_cache_t s_aim_cache[32];
+static int s_aim_cache_count = 0;
+static int s_aim_last_search = -1000000;
+
+static bool aim_cached(const char* name, int* px, int* py)
+{
+	for (int i = 0; i < s_aim_cache_count; i++)
+	{
+		if (strcmp(s_aim_cache[i].name, name) == 0)
+		{
+			*px = s_aim_cache[i].x;
+			*py = s_aim_cache[i].y;
+			return true;
+		}
+	}
+	return false;
+}
+
+static void aim_store(const char* name, int x, int y)
+{
+	for (int i = 0; i < s_aim_cache_count; i++)
+	{
+		if (strcmp(s_aim_cache[i].name, name) == 0)
+		{
+			s_aim_cache[i].x = x;
+			s_aim_cache[i].y = y;
+			return;
+		}
+	}
+	if (s_aim_cache_count < 32)
+	{
+		strncpy(s_aim_cache[s_aim_cache_count].name, name, 63);
+		s_aim_cache[s_aim_cache_count].name[63] = 0;
+		s_aim_cache[s_aim_cache_count].x = x;
+		s_aim_cache[s_aim_cache_count].y = y;
+		s_aim_cache_count++;
+	}
+}
+
+
 int	main(int argc, char *argv[])
 {
 
@@ -331,17 +372,24 @@ int	main(int argc, char *argv[])
 		bool	sdl_abort = true;
 		bool	sdl_cursor = true;
 		bool	auto_click_scan = false;
-		// -clk: scheduled clicks (repeatable); each is one press/release
-		// pair at movie coordinates on a given loop frame.
-		struct scheduled_click_t { int frame, x, y; };
-		scheduled_click_t	auto_clicks[24];
-		int	auto_click_count = 0;
-		// -drag: scheduled drag gestures (repeatable); hover, press at
-		// (x1,y1) on <frame>, interpolate to (x2,y2) over <dur> frames
-		// while held, then release.
-		struct scheduled_drag_t { int frame, x1, y1, x2, y2, dur; };
-		scheduled_drag_t	auto_drags[12];
-		int	auto_drag_count = 0;
+// -clk: scheduled clicks (repeatable); each is one press/release
+	// pair at movie coordinates on a given loop frame.  When time_ms is
+	// >= 0 the trigger is wall-clock milliseconds since start instead of a
+	// loop frame: the movie timeline advances on real time (delta_t comes
+	// from tu_timer), so loop-frame schedules land at a different movie
+	// state on every machine / build / trace level and are not reproducible.
+struct scheduled_click_t { int frame, x, y; int time_ms; int press_frame; bool fired; bool aim; tu_string want_name; };
+	scheduled_click_t	auto_clicks[24];
+	int	auto_click_count = 0;
+bool	dump_tree = false;
+bool	lv_trace = false;
+int	dump_tree_ms = -1;
+	// -drag: scheduled drag gestures (repeatable); hover, press at
+	// (x1,y1) on <frame>, interpolate to (x2,y2) over <dur> frames
+	// while held, then release.  time_ms >= 0 triggers on wall clock.
+	struct scheduled_drag_t { int frame, x1, y1, x2, y2, dur; int time_ms; int press_frame; bool fired; tu_string want_name; };
+	scheduled_drag_t	auto_drags[12];
+	int	auto_drag_count = 0;
 		float	tex_lod_bias;
 		bool	force_realtime_framerate = false;
 
@@ -395,6 +443,38 @@ int	main(int argc, char *argv[])
 				auto_clicks[auto_click_count].frame = atoi(argv[arg + 1]);
 				auto_clicks[auto_click_count].x = atoi(argv[arg + 2]);
 				auto_clicks[auto_click_count].y = atoi(argv[arg + 3]);
+				auto_clicks[auto_click_count].time_ms = -1;
+				auto_clicks[auto_click_count].press_frame = -1;
+				auto_clicks[auto_click_count].fired = false;
+				auto_clicks[auto_click_count].want_name = "";
+				auto_click_count++;
+				arg += 3;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-clkms") == 0)
+			{
+				// Wall-clock variant of -clk: press/release at (x,y) once the
+				// movie has been running for <ms> milliseconds.  Use this
+				// instead of -clk whenever the expected result depends on how
+				// far the movie timeline has progressed.
+				if (arg + 3 >= argc)
+				{
+					fprintf(stderr, "-clkms needs three args: <ms> <x> <y>\n");
+					exit(1);
+				}
+				if (auto_click_count >= 24)
+				{
+					fprintf(stderr, "-clkms: too many clicks (max 24)\n");
+					exit(1);
+				}
+				auto_clicks[auto_click_count].frame = -1;
+				auto_clicks[auto_click_count].x = atoi(argv[arg + 2]);
+				auto_clicks[auto_click_count].y = atoi(argv[arg + 3]);
+				auto_clicks[auto_click_count].time_ms = atoi(argv[arg + 1]);
+				auto_clicks[auto_click_count].press_frame = -1;
+				auto_clicks[auto_click_count].fired = false;
+				auto_clicks[auto_click_count].want_name = "";
 				auto_click_count++;
 				arg += 3;
 				continue;
@@ -422,6 +502,10 @@ int	main(int argc, char *argv[])
 				auto_drags[auto_drag_count].x2 = atoi(argv[arg + 4]);
 				auto_drags[auto_drag_count].y2 = atoi(argv[arg + 5]);
 				auto_drags[auto_drag_count].dur = 15;
+				auto_drags[auto_drag_count].time_ms = -1;
+				auto_drags[auto_drag_count].press_frame = -1;
+				auto_drags[auto_drag_count].fired = false;
+				auto_drags[auto_drag_count].want_name = "";
 				if (arg + 6 < argc && argv[arg + 6][0] >= '0' && argv[arg + 6][0] <= '9')
 				{
 					auto_drags[auto_drag_count].dur = atoi(argv[arg + 6]);
@@ -432,6 +516,180 @@ int	main(int argc, char *argv[])
 					arg += 5;
 				}
 				auto_drag_count++;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-dragms") == 0)
+			{
+				// Wall-clock variant of -drag.  Usage:
+				//   -dragms <ms> <x1> <y1> <x2> <y2> [durFrames]
+				if (arg + 5 >= argc)
+				{
+					fprintf(stderr, "-dragms needs args: <ms> <x1> <y1> <x2> <y2> [dur]\n");
+					exit(1);
+				}
+				if (auto_drag_count >= 12)
+				{
+					fprintf(stderr, "-dragms: too many drags (max 12)\n");
+					exit(1);
+				}
+				auto_drags[auto_drag_count].frame = -1;
+				auto_drags[auto_drag_count].x1 = atoi(argv[arg + 2]);
+				auto_drags[auto_drag_count].y1 = atoi(argv[arg + 3]);
+				auto_drags[auto_drag_count].x2 = atoi(argv[arg + 4]);
+				auto_drags[auto_drag_count].y2 = atoi(argv[arg + 5]);
+				auto_drags[auto_drag_count].dur = 15;
+				auto_drags[auto_drag_count].time_ms = atoi(argv[arg + 1]);
+				auto_drags[auto_drag_count].press_frame = -1;
+				auto_drags[auto_drag_count].fired = false;
+				auto_drags[auto_drag_count].want_name = "";
+				if (arg + 6 < argc && argv[arg + 6][0] >= '0' && argv[arg + 6][0] <= '9')
+				{
+					auto_drags[auto_drag_count].dur = atoi(argv[arg + 6]);
+					arg += 6;
+				}
+				else
+				{
+					arg += 5;
+				}
+				auto_drag_count++;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-dragto") == 0)
+			{
+				// State-triggered drag: hover at (x1,y1) and only press once
+				// the hit test there resolves to the display object named
+				// <name>; then drag to (x2,y2).  Frame- and time-numbered
+				// triggers are both unreliable here: the movie timeline runs
+				// on clamped real time, so how far the movie has progressed
+				// at a given loop frame (or wall-clock second) depends on
+				// how fast the host renders, which changes with tracing,
+				// frame dumping and machine speed.  Waiting for the actual
+				// object makes the gesture reproducible.  Usage:
+				//   -dragto <name> <x1> <y1> <x2> <y2> [durFrames]
+				if (arg + 5 >= argc)
+				{
+					fprintf(stderr, "-dragto needs args: <name> <x1> <y1> <x2> <y2> [dur]\n");
+					exit(1);
+				}
+				if (auto_drag_count >= 12)
+				{
+					fprintf(stderr, "-dragto: too many drags (max 12)\n");
+					exit(1);
+				}
+				auto_drags[auto_drag_count].frame = -1;
+				auto_drags[auto_drag_count].x1 = atoi(argv[arg + 2]);
+				auto_drags[auto_drag_count].y1 = atoi(argv[arg + 3]);
+				auto_drags[auto_drag_count].x2 = atoi(argv[arg + 4]);
+				auto_drags[auto_drag_count].y2 = atoi(argv[arg + 5]);
+				auto_drags[auto_drag_count].dur = 15;
+				auto_drags[auto_drag_count].time_ms = -1;
+				auto_drags[auto_drag_count].press_frame = -1;
+				auto_drags[auto_drag_count].fired = false;
+				auto_drags[auto_drag_count].want_name = argv[arg + 1];
+				if (arg + 6 < argc && argv[arg + 6][0] >= '0' && argv[arg + 6][0] <= '9')
+				{
+					auto_drags[auto_drag_count].dur = atoi(argv[arg + 6]);
+					arg += 6;
+				}
+				else
+				{
+					arg += 5;
+				}
+				auto_drag_count++;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-clickto") == 0)
+			{
+				// State-triggered click: click (x,y) only once the hit test
+				// there resolves to the display object named <name>, then
+				// release.  Same rationale as -dragto: the movie timeline
+				// runs on clamped real time, so a frame- or time-numbered
+				// click lands at a different game state on every host.
+				// Usage: -clickto <name> <x> <y>
+				if (arg + 3 >= argc)
+				{
+					fprintf(stderr, "-clickto needs args: <name> <x> <y>\n");
+					exit(1);
+				}
+				if (auto_click_count >= 24)
+				{
+					fprintf(stderr, "-clickto: too many clicks (max 24)\n");
+					exit(1);
+				}
+				auto_clicks[auto_click_count].frame = -1;
+				auto_clicks[auto_click_count].x = atoi(argv[arg + 2]);
+				auto_clicks[auto_click_count].y = atoi(argv[arg + 3]);
+				auto_clicks[auto_click_count].time_ms = -1;
+				auto_clicks[auto_click_count].press_frame = -1;
+				auto_clicks[auto_click_count].fired = false;
+				auto_clicks[auto_click_count].aim = false;
+				auto_clicks[auto_click_count].want_name = argv[arg + 1];
+				auto_click_count++;
+				arg += 3;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-clickname") == 0)
+			{
+				// Click the object itself: find the display object called
+				// <name> anywhere in the tree, aim at the centre of where it
+				// is actually drawn, and press once it is reachable there.
+				//
+				// This is the difference between a test that plays the game
+				// and one that replays three magic coordinates: everything
+				// that moves, scales or sits at another depth is followed
+				// automatically, exactly like a person aiming at a button.
+				// Usage: -clickname <name>
+				if (arg + 1 >= argc)
+				{
+					fprintf(stderr, "-clickname needs arg: <name>\n");
+					exit(1);
+				}
+				if (auto_click_count >= 24)
+				{
+					fprintf(stderr, "-clickname: too many clicks (max 24)\n");
+					exit(1);
+				}
+				auto_clicks[auto_click_count].frame = -1;
+				auto_clicks[auto_click_count].x = -1;
+				auto_clicks[auto_click_count].y = -1;
+				auto_clicks[auto_click_count].time_ms = -1;
+				auto_clicks[auto_click_count].press_frame = -1;
+				auto_clicks[auto_click_count].fired = false;
+				auto_clicks[auto_click_count].aim = true;
+				auto_clicks[auto_click_count].want_name = argv[arg + 1];
+				auto_click_count++;
+				arg += 1;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-lvtrace") == 0)
+			{
+				// Log the doll's garment layers (frame + play state) whenever
+				// they change, for a whole play-through.
+				// Usage: -lvtrace
+				lv_trace = true;
+				arg += 0;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-dumptree") == 0)
+			{
+				// Print every named display object with the position it is
+				// drawn at.  Used to find out what the game actually calls its
+				// controls instead of guessing coordinates.
+				// Usage: -dumptree <ms>
+				if (arg + 1 >= argc)
+				{
+					fprintf(stderr, "-dumptree needs arg: <ms>\n");
+					exit(1);
+				}
+				dump_tree_ms = atoi(argv[arg + 1]);
+				dump_tree = true;
+				arg += 1;
 				continue;
 			}
 
@@ -1239,6 +1497,8 @@ int	main(int argc, char *argv[])
 				}
 			}
 
+			int elapsed_ms = (int) (ticks - start_ticks);
+
 			// Test hook (-clk): move to the target point, press on the given
 			// loop frame and release two frames later, so root::on_mouse_event
 			// sees a real press -> release on the same character (which is what
@@ -1250,32 +1510,176 @@ int	main(int argc, char *argv[])
 
 				for (int ci = 0; ci < auto_click_count; ci++)
 				{
-					const scheduled_click_t& c = auto_clicks[ci];
+					scheduled_click_t& c = auto_clicks[ci];
+					int frame = c.frame;
+
+					if (c.want_name.size() > 0)
+					{
+						// State-triggered (-clickto / -clickname): wait until the
+						// click can actually land on the requested object.
+						// The pointer is not touched while waiting, so other
+						// scheduled gestures in the same frame are unaffected.
+						if (!c.fired)
+						{
+							int want_x = c.x;
+							int want_y = c.y;
+
+							if (c.aim)
+							{
+								// Every one of the game's controls is already
+								// on screen at the same time, so "wait until
+								// it is clickable" fires them all on a single
+								// frame - each press then lands before the game
+								// has reacted to the previous one.  Hold off
+								// until the game has had time to settle.
+								static int s_last_aim_fire = -1000000;
+								if (elapsed_ms - s_last_aim_fire < 1500)
+								{
+									continue;
+								}
+
+								// Track the object wherever it is drawn right
+								// now, and only take the shot once we have
+								// found a point a press would really land on
+								// it - i.e. exactly where a person would
+								// click.  The search is expensive, so the
+								// result is cached and only redone (rate
+								// limited) if the cached point stops being
+								// valid, e.g. after the screen changed.
+								int cx = 0, cy = 0;
+								bool have = aim_cached(c.want_name.c_str(), &cx, &cy);
+								if (have)
+								{
+									gameswf::character* te =
+										m->hit_test_pixel((float) cx, (float) cy);
+									have = te != NULL
+										&& tu_string(te->get_name().c_str()) == c.want_name;
+								}
+								if (!have)
+								{
+									if (elapsed_ms - s_aim_last_search < 300)
+									{
+										continue;
+									}
+									s_aim_last_search = elapsed_ms;
+
+									float fx = 0, fy = 0;
+									gameswf::character* ch =
+										m->find_named_in_tree(c.want_name.c_str());
+									if (ch == NULL
+										|| !m->find_click_point(ch, &fx, &fy))
+									{
+										continue;
+									}
+									cx = (int) fx;
+									cy = (int) fy;
+								}
+								want_x = cx;
+								want_y = cy;
+								aim_store(c.want_name.c_str(), cx, cy);
+								s_last_aim_fire = elapsed_ms;
+							}
+							else
+							{
+								gameswf::character* target_te =
+									m->hit_test_pixel((float) want_x, (float) want_y);
+								if (target_te == NULL
+									|| tu_string(target_te->get_name().c_str()) != c.want_name)
+								{
+									continue;
+								}
+							}
+
+							// Freeze the aim point now: the object may keep
+							// moving after the press, and the release has to
+							// land where the press did.
+							c.x = want_x;
+							c.y = want_y;
+							c.fired = true;
+							c.press_frame = s_click_frame;
+						}
+						frame = c.press_frame;
+					}
+
+					if (c.time_ms >= 0)
+					{
+						// Wall-clock scheduled (-clkms): wait until the movie has
+						// been running long enough, then press; release two
+						// loop frames later.
+						int now_ms = (int) (ticks - start_ticks);
+						if (!c.fired)
+						{
+							// Hover for ~100ms before the trigger so the
+							// roll-over update has already picked a target.
+							if (now_ms >= c.time_ms - 100)
+							{
+								mouse_x = c.x;
+								mouse_y = c.y;
+							}
+							if (now_ms < c.time_ms)
+							{
+								continue;
+							}
+							// Arm on this frame and fall through, so the
+							// press really happens now.  Continuing here
+							// used to skip the press and still fire the
+							// release two frames later, so -clkms clicks
+							// never reached the game at all.
+							c.fired = true;
+							c.press_frame = s_click_frame;
+						}
+						frame = c.press_frame;
+					}
 
 					// Hover a few frames before pressing.  root::generate_mouse_button_events
 					// only records m_active_entity while the button is UP (ROLL_OVER), so a
 					// press on the very frame the cursor arrives would see active==NULL and
 					// neither PRESS nor RELEASE would ever reach the character.
-					if (s_click_frame >= c.frame - 4 && s_click_frame <= c.frame + 2)
+					if (c.time_ms < 0
+						&& s_click_frame >= frame - 4 && s_click_frame <= frame + 2)
 					{
 						mouse_x = c.x;
 						mouse_y = c.y;
 					}
 
-					if (s_click_frame == c.frame)
+					if (s_click_frame == frame)
 					{
+						mouse_x = c.x;
+						mouse_y = c.y;
 						mouse_buttons = 1;
-						fprintf(stderr, "[CLK] press at %d,%d loop_frame=%d\n",
-							mouse_x, mouse_y, s_click_frame);
+						fprintf(stderr, "[CLK] press at %d,%d loop_frame=%d%s\n",
+							mouse_x, mouse_y, s_click_frame,
+							c.time_ms >= 0 ? " (wall-clock)" : "");
 						fflush(stderr);
 					}
-					else if (s_click_frame == c.frame + 2)
+					else if (s_click_frame == frame + 2)
 					{
 						mouse_buttons = 0;
-						fprintf(stderr, "[CLK] release at %d,%d loop_frame=%d\n",
-							mouse_x, mouse_y, s_click_frame);
+						fprintf(stderr, "[CLK] release at %d,%d loop_frame=%d%s\n",
+							mouse_x, mouse_y, s_click_frame,
+							c.time_ms >= 0 ? " (wall-clock)" : "");
 						fflush(stderr);
 					}
+				}
+			}
+
+			// Test hook (-lvtrace): follow the doll's garment layers and log each one
+			// when its frame or play state changes.  Cheap enough to leave on
+			// for a whole play-through done by hand.
+			if (lv_trace)
+			{
+				m->trace_outfit_layers();
+			}
+
+			// Test hook (-dumptree): list the named display objects and where they are.
+			if (dump_tree)
+			{
+				static int s_last_dump = -100000;
+				if (elapsed_ms >= dump_tree_ms && elapsed_ms - s_last_dump >= 4000)
+				{
+					s_last_dump = elapsed_ms;
+					fprintf(stderr, "\n=== tree @%dms ===\n", elapsed_ms);
+					m->dump_named_tree();
 				}
 			}
 
@@ -1288,9 +1692,83 @@ int	main(int argc, char *argv[])
 
 				for (int di = 0; di < auto_drag_count; di++)
 				{
-					const scheduled_drag_t& d = auto_drags[di];
-					int start = d.frame;
+					scheduled_drag_t& d = auto_drags[di];
 					int dur = d.dur > 0 ? d.dur : 15;
+					int start = d.frame;
+
+					if (d.want_name.size() > 0)
+					{
+						// State-triggered (-dragto): keep the cursor parked on
+						// the grab point and press only once the hit test
+						// there resolves to the requested object.  Until then
+						// the button stays up so the press frame itself still
+						// sees the right roll-over target.
+						if (d.fired)
+						{
+							start = d.press_frame;
+						}
+						else
+						{
+							// Wait for the target to appear under the grab
+							// point.  The cursor is deliberately NOT moved
+							// while waiting: the hit test is done directly
+							// against (x1,y1), and stealing the pointer
+							// would clobber any -clk/-drag scheduled in the
+							// same frame (this block runs after them).
+							gameswf::character* target_te =
+								m->hit_test_pixel((float) d.x1, (float) d.y1);
+							if (target_te != NULL)
+							{
+								if (tu_string(target_te->get_name().c_str()) == d.want_name)
+								{
+									d.fired = true;
+									d.press_frame = s_drag_frame;
+									start = s_drag_frame;
+								}
+								else
+								{
+									continue;
+								}
+							}
+							else
+							{
+								continue;
+							}
+						}
+					}
+
+					if (d.time_ms >= 0)
+					{
+						// Wall-clock scheduled (-dragms): wait until the movie
+						// has run long enough, then pin the drag to loop frames
+						// starting now.  The movie timeline advances on real time
+						// while these triggers used to count loop frames, so a
+						// frame-numbered drag lands at a different movie state
+						// on every machine and is not reproducible.
+						int now_ms = (int) (ticks - start_ticks);
+						if (!d.fired)
+						{
+							if (now_ms >= d.time_ms - 100)
+							{
+								mouse_x = d.x1;
+								mouse_y = d.y1;
+							}
+							if (now_ms >= d.time_ms)
+							{
+								d.fired = true;
+								d.press_frame = s_drag_frame;
+								start = s_drag_frame;
+							}
+							else
+							{
+								continue;
+							}
+						}
+						else
+						{
+							start = d.press_frame;
+						}
+					}
 					int end = start + dur;
 
 					if (s_drag_frame >= start - 4 && s_drag_frame < start)
@@ -1303,8 +1781,9 @@ int	main(int argc, char *argv[])
 						mouse_x = d.x1;
 						mouse_y = d.y1;
 						mouse_buttons = 1;
-						fprintf(stderr, "[DRAG] press at %d,%d loop_frame=%d\n",
-							mouse_x, mouse_y, s_drag_frame);
+						fprintf(stderr, "[DRAG] press at %d,%d loop_frame=%d%s\n",
+							mouse_x, mouse_y, s_drag_frame,
+							d.time_ms >= 0 ? " (wall-clock)" : "");
 						fflush(stderr);
 					}
 					else if (s_drag_frame > start && s_drag_frame <= end)
@@ -1315,8 +1794,9 @@ int	main(int argc, char *argv[])
 						mouse_buttons = 1;
 						if (step == 1 || step == dur / 2 || step == dur)
 						{
-							fprintf(stderr, "[DRAG] move to %d,%d loop_frame=%d\n",
-								mouse_x, mouse_y, s_drag_frame);
+							fprintf(stderr, "[DRAG] move to %d,%d loop_frame=%d%s\n",
+								mouse_x, mouse_y, s_drag_frame,
+								d.time_ms >= 0 ? " (wall-clock)" : "");
 							fflush(stderr);
 						}
 					}
@@ -1325,8 +1805,9 @@ int	main(int argc, char *argv[])
 						mouse_x = d.x2;
 						mouse_y = d.y2;
 						mouse_buttons = 0;
-						fprintf(stderr, "[DRAG] release at %d,%d loop_frame=%d\n",
-							mouse_x, mouse_y, s_drag_frame);
+						fprintf(stderr, "[DRAG] release at %d,%d loop_frame=%d%s\n",
+							mouse_x, mouse_y, s_drag_frame,
+							d.time_ms >= 0 ? " (wall-clock)" : "");
 						fflush(stderr);
 					}
 				}
@@ -1350,17 +1831,94 @@ int	main(int argc, char *argv[])
 				}
 				t_display = tu_timer::get_ticks() - t_display;
 
-			if (do_render)
+		if (do_render)
+		{
+			// Framebuffer capture used for animation verification.
+			// IMPORTANT: this must run BEFORE the swap.  The context is
+			// double buffered (SDL_GL_DOUBLEBUFFER=1), so once we swap the
+			// contents of the buffer we drew into are undefined and the dump
+			// would be a stale/garbage frame rather than the frame we drew.
 			{
-				Uint32 t_swap = tu_timer::get_ticks();
-				glFinish();	// ensure all GL commands complete before swap
-				// Bypass SDL_GL_SwapBuffers macro - call SDL_GL_SwapWindow directly
-				SDL_GL_SwapWindow(g_sdl_window);
-					t_swap = tu_timer::get_ticks() - t_swap;
-					//glPopAttrib ();
+				static int s_fb_frame = 0;
+				static int s_fb_dumps = 0;
+				s_fb_frame++;
 
+				// Frame dumping is opt-in: a glReadPixels plus a PPM write every 20th
+				// frame is slow enough to hold the movie down to a couple of
+				// frames per second, which makes any timed test unreliable.
+				// Set GAMESWF_FB_DIR to turn it on.
+				const char* fb_dir = getenv("GAMESWF_FB_DIR");
+				bool fb_enabled = (fb_dir != NULL && fb_dir[0] != 0);
+				const char* every_s = getenv("GAMESWF_FB_EVERY");
+				int every = (every_s != NULL && every_s[0] != 0) ? atoi(every_s) : 20;
+				if (every < 1) { every = 1; }
 
-					frame_counter++;
+				const char* max_s = getenv("GAMESWF_FB_MAX");
+				int fb_max = (max_s != NULL && max_s[0] != 0) ? atoi(max_s) : 400;
+
+				bool want = fb_enabled
+					&& ((s_fb_frame <= 3) || ((s_fb_frame % every) == 0));
+
+				// GAMESWF_PICK=x,y dumps the display-list path drawn at that
+				// screen pixel, so we can identify what renders a particular pixel.
+				// It runs on every capture so we can see the tree once the
+				// screen we care about is up.
+				const char* pick_s = getenv("GAMESWF_PICK");
+				bool do_pick = (pick_s != NULL && pick_s[0] != 0 && want);
+
+				if (want && s_fb_dumps < fb_max)
+				{
+					s_fb_dumps++;
+					int nw = width, nh = height;
+					unsigned char* buf = new unsigned char[(size_t) nw * nh * 4];
+					glReadPixels(0, 0, nw, nh, GL_RGBA, GL_UNSIGNED_BYTE, buf);
+
+					char fn[512];
+					sprintf(fn, "%s/fb_%04d.ppm", fb_dir, s_fb_frame);
+					FILE* f = fopen(fn, "wb");
+					if (f)
+					{
+						// Announce the capture so a log line can be matched to
+						// the exact image: the render-frame counter here is not
+						// the harness loop-frame counter.
+						fprintf(stderr, "[FB] n=%d\n", s_fb_frame);
+						fflush(stderr);
+						if (do_pick)
+						{
+							float pxp = 0.0f, pyp = 0.0f;
+							if (sscanf(pick_s, "%f,%f", &pxp, &pyp) == 2)
+							{
+								fprintf(stderr, "[PICK] probing %f,%f at frame %d\n", pxp, pyp, s_fb_frame);
+								fflush(stderr);
+								m->pick_report_at(pxp, pyp);
+								fflush(stderr);
+							}
+						}
+						fprintf(f, "P6\n%d %d\n255\n", nw, nh);
+						// GL origin is bottom-left, PPM is top-left: flip rows.
+						for (int y = nh - 1; y >= 0; y--)
+						{
+							const unsigned char* row = buf + (size_t) y * nw * 4;
+							for (int x = 0; x < nw; x++)
+							{
+								fputc(row[x * 4 + 0], f);
+								fputc(row[x * 4 + 1], f);
+								fputc(row[x * 4 + 2], f);
+							}
+						}
+						fclose(f);
+					}
+					delete[] buf;
+				}
+			}
+
+			Uint32 t_swap = tu_timer::get_ticks();
+			glFinish();	// ensure all GL commands complete before swap
+			// Bypass SDL_GL_SwapBuffers macro - call SDL_GL_SwapWindow directly
+			SDL_GL_SwapWindow(g_sdl_window);
+			t_swap = tu_timer::get_ticks() - t_swap;
+
+				frame_counter++;
 
 					// Log the frame rate every second or so.
 					if (last_ticks - last_logged_fps > 1000)

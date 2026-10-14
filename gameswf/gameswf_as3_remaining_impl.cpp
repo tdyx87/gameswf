@@ -758,11 +758,18 @@ static void applicationdomain_hasDefinition(const fn_call& fn)
 
 static void contextmenu_constructor(const fn_call& fn)
 {
-	gc_ptr<as_object> menu = new as_object(fn.get_player());
-	menu->set_member("customItems", as_value(new as_array(fn.get_player())));
-	menu->set_member("builtInItems", as_value(new as_object(fn.get_player())));
-	menu->set_member("hideBuiltInItems", as_value(false));
-	fn.result->set_as_object(menu.get_ptr());
+	// Via `new`, the engine passes the fresh instance as this_ptr; attach
+	// members there (an object stored in fn.result would be discarded).
+	as_object* obj = fn.this_ptr;
+	if (obj == NULL)
+	{
+		gc_ptr<as_object> menu = new as_object(fn.get_player());
+		obj = menu.get_ptr();
+		fn.result->set_as_object(obj);
+	}
+	obj->set_member("customItems", as_value(new as_array(fn.get_player())));
+	obj->set_member("builtInItems", as_value(new as_object(fn.get_player())));
+	obj->set_member("hideBuiltInItems", as_value(false));
 }
 
 static void contextmenu_hideBuiltInItems(const fn_call& fn)
@@ -1035,6 +1042,10 @@ void as3_register_remaining_classes(player* player)
 
 		as_object* cm_class = new as_object(player);
 		cm_class->set_member("prototype", as_value(cm_proto.get_ptr()));
+		// `new ContextMenu()` must build a fresh instance (with its own
+		// customItems array), not return the class object itself.  The
+		// constructprop path looks up "constructor" on the class object.
+		cm_class->set_member("constructor", as_value(contextmenu_constructor));
 		// Static constants (flash.ui.ContextMenu.MENU_SELECT etc.)
 		cm_class->set_member("MENU_SELECT", as_value("menuSelect"));
 		cm_class->set_member("MENU_ITEM_SELECT", as_value("menuItemSelect"));

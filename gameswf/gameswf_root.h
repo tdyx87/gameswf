@@ -108,6 +108,23 @@ namespace gameswf
 
 		exported_module int	get_current_frame() const;
 		exported_module int	get_frame_count() { return get_root_movie()->get_frame_count(); }
+
+		// Test/diagnostic helper: resolve the display object that would
+		// receive a mouse press at the given pixel position.  Used by the
+		// harness' state-triggered -dragto gesture, which waits until the
+		// object under the cursor is actually the one it wants to grab.
+		character*	hit_test_pixel(float x, float y);
+
+	// Locate a display object by its instance name anywhere in the display
+	// tree, and work out where it is actually drawn.  Test harnesses use
+	// these to drive the same objects a user would click, instead of
+	// relying on hard coded pixel positions.
+	character*	find_named_in_tree(const char* name);
+	bool		get_stage_center(character* ch, float* cx, float* cy);
+	bool		find_click_point(character* ch, float* px, float* py);
+	void		dump_named_tree();
+	void		trace_outfit_layers();
+	void		pick_report_at(float x, float y);
 		float	get_frame_rate() const;
 		void	set_frame_rate(float rate);
 

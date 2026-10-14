@@ -10,10 +10,13 @@
 // http://sswf.sourceforge.net/SWFalexref.html
 // http://www.openswf.org
 
+#include "gameswf/gameswf_character.h"
 #include "gameswf/gameswf_movie_def.h"
 #include "gameswf/gameswf_render.h"
 #include "gameswf/gameswf_root.h"
+#include "gameswf/gameswf_shape.h"
 #include "gameswf/gameswf_sprite.h"
+#include "gameswf/gameswf_impl.h"
 #include "base/tu_random.h"
 
 #ifdef _WIN32
@@ -635,6 +638,391 @@ namespace gameswf
 		return m_pixel_scale;
 	}
 
+	character*	root::hit_test_pixel(float x, float y)
+	// Resolve the display object that would receive a mouse press at the
+	// given pixel position.  Same call generate_mouse_button_events() uses
+	// each frame, exposed so the harness can drive reproducible gestures.
+	{
+		character* te = NULL;
+		m_movie->get_topmost_mouse_entity(te,
+			PIXELS_TO_TWIPS((int) x), PIXELS_TO_TWIPS((int) y));
+		return te;
+	}
+
+	static character* find_named(character* ch, const char* name)
+	// Depth first search of the display tree for a clip with the given name.
+	// Children are walked from the top of the stack downwards so that a
+	// harness ends up with the same instance a user would actually click -
+	// an object that is covered by another one is not reachable by hand.
+	{
+		if (ch == NULL || name == NULL)
+		{
+			return NULL;
+		}
+
+		if (ch->get_name().size() > 0 && strcmp(ch->get_name().c_str(), name) == 0)
+		{
+			return ch;
+		}
+
+		sprite_instance* sp =
+			cast_to<sprite_instance>(ch);
+		if (sp == NULL)
+		{
+			return NULL;
+		}
+
+		int n = sp->avm2_get_num_children();
+		for (int i = n - 1; i >= 0; i--)
+		{
+			character* found = find_named(sp->avm2_get_child_at(i), name);
+			if (found != NULL)
+			{
+				return found;
+			}
+		}
+		return NULL;
+	}
+
+	character*	root::find_named_in_tree(const char* name)
+	{
+		return find_named(m_movie, name);
+	}
+
+	// Walk the display list and report every character whose screen-space
+	// bounds contain the given pixel, in draw order (bottom first).  Test
+	// harnesses use this to find out what actually paints a given pixel,
+	// including the fill styles a shape carries.  Enabled with GAMESWF_PICK.
+	static void pick_report(character* ch, float x, float y, int depth)
+	{
+		if (ch == NULL)
+		{
+			return;
+		}
+
+		rect local;
+		ch->get_bound(&local);
+		matrix m = ch->get_world_matrix();
+		rect area = local;
+		m.transform(&area);
+
+		float x0 = (float) TWIPS_TO_PIXELS(area.m_x_min);
+		float x1 = (float) TWIPS_TO_PIXELS(area.m_x_max);
+		float y0 = (float) TWIPS_TO_PIXELS(area.m_y_min);
+		float y1 = (float) TWIPS_TO_PIXELS(area.m_y_max);
+
+		bool inside = (x >= x0 && x <= x1 && y >= y0 && y <= y1);
+		if (inside && depth < 30)
+		{
+			// One line per character: what it is, where it is, and -- for
+			// shapes -- the fill styles it carries.  Children are reported in
+			// draw order (bottom first), so this shows what is painted on
+			// top of what.
+			const char* kind = "sprite";
+			char detail_buf[512];
+			detail_buf[0] = 0;
+			const char* detail = detail_buf;
+
+			if (cast_to<sprite_instance>(ch) == NULL)
+			{
+				shape_character_def* sh = cast_to<shape_character_def>(ch->get_character_def());
+				if (sh != NULL)
+				{
+					kind = "SHAPE";
+					const array<fill_style>& fs = sh->get_fill_styles();
+					int pos = 0;
+					for (int k = 0; k < fs.size() && k < 6; k++)
+					{
+						const rgba& c = fs[k].get_color();
+						pos += snprintf(detail_buf + pos, sizeof(detail_buf) - pos,
+							" fill[%d]{0x%X,%d,%d,%d,%d}", k, fs[k].get_type(),
+							c.m_r, c.m_g, c.m_b, c.m_a);
+					}
+				}
+				else
+				{
+					bitmap_character* bc = cast_to<bitmap_character>(ch->get_character_def());
+					kind = (bc != NULL) ? "BITMAP" : "LEAF";
+				}
+			}
+			detail = detail_buf;
+
+			fprintf(stderr, "[PICK]%*sid=%-5d %-6s name='%s' z=%d vis=%d blend=%d ratio=%.2f bounds=(%.0f,%.0f)-(%.0f,%.0f)%s\n",
+				depth, "", ch->get_id(), kind, ch->get_name().c_str(), (int) ch->m_depth,
+				(int) ch->m_visible, (int) ch->m_blend_mode, ch->m_ratio, x0, y0, x1, y1, detail);
+		}
+
+		sprite_instance* sp = cast_to<sprite_instance>(ch);
+		if (sp == NULL)
+		{
+			return;
+		}
+		int n = sp->avm2_get_num_children();
+		for (int i = 0; i < n; i++)
+		{
+			pick_report(sp->avm2_get_child_at(i), x, y, inside ? depth + 1 : depth);
+		}
+	}
+
+	void	root::pick_report_at(float x, float y)
+	{
+		pick_report(m_movie, x, y, 0);
+	}
+
+	static bool is_descendant_of(character* ch, character* ancestor)
+	{
+		for (character* c = ch; c != NULL; c = c->get_parent())
+		{
+			if (c == ancestor)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	bool	root::find_click_point(character* ch, float* px, float* py)
+	// Find somewhere on this clip that a real press would land on it.
+	//
+	// The centre of the bounding box is no use as an aim point: buttons are
+	// built out of several pieces, and the middle is frequently empty or is
+	// covered by a child that swallows the press.  So probe the area the clip
+	// occupies and keep the first position the hit test agrees belongs to it.
+	//
+	// The probe count is budgeted.  Every probe walks the display tree, and
+	// this runs from inside the frame loop - an unbounded sweep of the whole
+	// stage used to take seconds per click and stall the movie so badly that
+	// the following scheduled click landed before the game had reacted to
+	// the previous one.
+	{
+		if (ch == NULL)
+		{
+			return false;
+		}
+
+		rect local;
+		ch->get_bound(&local);
+
+		matrix m = ch->get_world_matrix();
+		rect area = local;
+		m.transform(&area);
+
+		float x0 = (float) TWIPS_TO_PIXELS(area.m_x_min);
+		float x1 = (float) TWIPS_TO_PIXELS(area.m_x_max);
+		float y0 = (float) TWIPS_TO_PIXELS(area.m_y_min);
+		float y1 = (float) TWIPS_TO_PIXELS(area.m_y_max);
+
+		// A degenerate matrix (a zero scale during a transition) produces
+		// NaN here; fall through to the coarse sweep instead.
+		if (x1 > x0 && y1 > y0)
+		{
+			const int steps = 20;
+			for (int pass = 0; pass < 2; pass++)
+			{
+				for (int j = 0; j <= steps; j++)
+				{
+					for (int i = 0; i <= steps; i++)
+					{
+						float x = x0 + (x1 - x0) * i / steps;
+						float y = y0 + (y1 - y0) * j / steps;
+						character* te = hit_test_pixel(x, y);
+						if (te == ch
+							|| (pass == 1 && is_descendant_of(te, ch)))
+						{
+							*px = x;
+							*py = y;
+							return true;
+						}
+					}
+				}
+			}
+		}
+
+		// Nothing inside the reported bounds answered.  The bound is often
+		// much tighter (or offset) compared to the artwork that is really
+		// drawn - a button can sit well away from its own bounding box - so
+		// sweep the stage.  This runs once per name and the caller caches
+		// the answer, so it does not have to be cheap, only bounded.
+		{
+			const int step = 16;
+			int stage_w = get_movie_width();
+			int stage_h = get_movie_height();
+			for (int y = step; y < stage_h; y += step)
+			{
+				for (int x = step; x < stage_w; x += step)
+				{
+					character* te = hit_test_pixel((float) x, (float) y);
+					if (te == ch || is_descendant_of(te, ch))
+					{
+						*px = (float) x;
+						*py = (float) y;
+						return true;
+					}
+				}
+			}
+		}
+
+		return false;
+	}
+
+	static bool stage_center_of(character* ch, float* cx, float* cy)
+	{
+		if (ch == NULL)
+		{
+			return false;
+		}
+
+		rect bound;
+		ch->get_bound(&bound);
+		if (bound.m_x_max <= bound.m_x_min || bound.m_y_max <= bound.m_y_min)
+		{
+			return false;
+		}
+
+		matrix m = ch->get_world_matrix();
+		point p((bound.m_x_min + bound.m_x_max) / 2,
+				(bound.m_y_min + bound.m_y_max) / 2);
+		m.transform(&p, p);
+
+		*cx = (float) TWIPS_TO_PIXELS(p.m_x);
+		*cy = (float) TWIPS_TO_PIXELS(p.m_y);
+		return true;
+	}
+
+	static void dump_named(character* ch, int depth)
+	{
+		if (ch == NULL || depth > 24)
+		{
+			return;
+		}
+
+		if (ch->get_name().size() > 0)
+		{
+			float cx = 0, cy = 0;
+			if (stage_center_of(ch, &cx, &cy))
+			{
+				sprite_instance* sp = cast_to<sprite_instance>(ch);
+				fprintf(stderr, "[TREE] %*s%s id=%d depth=%d at %.0f,%.0f frame=%d\n",
+					depth * 2, "", ch->get_name().c_str(), ch->get_id(),
+					ch->get_depth(), cx, cy, sp ? sp->get_current_frame() : -1);
+			}
+		}
+
+		sprite_instance* sp = cast_to<sprite_instance>(ch);
+		if (sp == NULL)
+		{
+			return;
+		}
+
+		int n = sp->avm2_get_num_children();
+		for (int i = 0; i < n; i++)
+		{
+			dump_named(sp->avm2_get_child_at(i), depth + 1);
+		}
+	}
+
+	static void trace_outfit(character* ch, int depth)
+	// The doll's garment layers, logged only when the frame or the play state
+	// changes.  That is quiet enough to leave on while someone plays by hand,
+	// and it still shows exactly when a garment is chosen, which frame it
+	// lands on, and whether the layer was stopped or left running.
+	{
+		if (ch == NULL || depth > 24)
+		{
+			return;
+		}
+
+		const char* n = ch->get_name().c_str();
+		if (n[0] == 'L' && n[1] == 'V')
+		{
+			sprite_instance* lsp = cast_to<sprite_instance>(ch);
+			if (lsp != NULL)
+			{
+				// Key the "last seen" state on the id, so a layer that gets
+				// rebuilt (a fresh instance on the show screen) reports its
+				// first frame again instead of looking unchanged.
+				int id = ch->get_id();
+				static int s_last_id[32] = { 0 };
+				static int s_last_frame[32] = { -1 };
+				static int s_last_play[32] = { -1 };
+				static int s_count = 0;
+
+				int slot = -1;
+				for (int i = 0; i < s_count; i++)
+				{
+					if (s_last_id[i] == id) { slot = i; break; }
+				}
+				if (slot < 0 && s_count < 32)
+				{
+					slot = s_count++;
+					s_last_id[slot] = id;
+				}
+
+				if (slot >= 0)
+				{
+					int f = lsp->get_current_frame();
+					int p = (int) lsp->get_play_state();
+					if (f != s_last_frame[slot] || p != s_last_play[slot])
+					{
+						s_last_frame[slot] = f;
+						s_last_play[slot] = p;
+						float cx = 0, cy = 0;
+						stage_center_of(ch, &cx, &cy);
+
+						// Who is this layer hanging off?  On the dress-up
+						// screen the doll is built by one symbol and on the
+						// show screen by another, so the parent says which
+						// display is actually supplying the visible outfit.
+						character* par = ch->get_parent();
+						char pname[40];
+						if (par != NULL && par->get_name().size() > 0)
+						{
+							strncpy(pname, par->get_name().c_str(), 39);
+							pname[39] = 0;
+						}
+						else
+						{
+							snprintf(pname, sizeof(pname), "(id=%d)", par ? par->get_id() : -1);
+						}
+
+						fprintf(stderr,
+							"[OUTFIT] %-4s id=%-5d frame=%-3d %-4s parent=%s at %.0f,%.0f depth=%d\n",
+							n, id, f, p == (int) character::STOP ? "STOP" : "PLAY",
+							pname, cx, cy, ch->get_depth());
+						fflush(stderr);
+					}
+				}
+			}
+		}
+
+		sprite_instance* sp = cast_to<sprite_instance>(ch);
+		if (sp == NULL)
+		{
+			return;
+		}
+		int nc = sp->avm2_get_num_children();
+		for (int i = 0; i < nc; i++)
+		{
+			trace_outfit(sp->avm2_get_child_at(i), depth + 1);
+		}
+	}
+
+	void	root::trace_outfit_layers()
+	{
+		trace_outfit(m_movie, 0);
+	}
+
+	void	root::dump_named_tree()
+	{
+		dump_named(m_movie, 0);
+		fflush(stderr);
+	}
+
+	bool	root::get_stage_center(character* ch, float* cx, float* cy)
+	{
+		return stage_center_of(ch, cx, cy);
+	}
+
 	// @@ Is this one necessary?
 	character*	root::get_character(int character_id)
 	{
@@ -710,10 +1098,32 @@ namespace gameswf
 					const abc_def* adef  = m_def->get_abc();
 					if (adef)
 					{
-						as_function* script_func = adef->get_script_function();
-						if (script_func)
+						// AVM2 spec: every script's init method runs exactly
+						// once, in script order (0..n-1).  We used to run only
+						// the LAST script's init here; the other scripts were
+						// initialized lazily, but only on getlex /
+						// findpropstrict -- a plain `getproperty __showMenu`
+						// never triggered it.  Script-level functions defined
+						// by earlier scripts (the shell's __showMenu /
+						// __moreGame / __showMid / readyGame) then never
+						// appeared on the global object, the event-handler
+						// registration failed with GPF_MISS and the game menu
+						// could not be shown.
+						int nscripts = adef->m_script.size();
+						for (int s = 0; s < nscripts; s++)
 						{
-							fprintf(stderr, "AVM2: Running script init...\n");
+							script_info* si = adef->m_script[s].get();
+							if (si == NULL || si->m_executed)
+							{
+								continue;
+							}
+							as_function* script_func =
+								adef->get_method(si->m_init);
+							if (script_func == NULL)
+							{
+								continue;
+							}
+							si->m_executed = true;
 							as_environment env(m_player.get_ptr());
 							// Script init runs with the global object as its
 							// 'this' (ECMA-262: [[Scope]] of a script starts
@@ -723,7 +1133,6 @@ namespace gameswf
 							// unqualified global lookups then saw root members.
 							gameswf::call_method(script_func,
 								&env, as_value(m_player->get_global()), 0, 0);
-							fprintf(stderr, "AVM2: Script init done\n");
 						}
 					}
 				}

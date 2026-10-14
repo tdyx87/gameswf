@@ -11,6 +11,25 @@
 namespace gameswf
 {
 
+	// ===== flash.net.LocalConnection =====
+	// The shell SWF builds its branding URLs from LocalConnection.domain().
+	// We run as a standalone projector, so "localhost" (the value Flash
+	// reports for local/single-instance playback) is the right answer.
+	// NOTE: domain is a GETTER in AS3 (public function get domain): a
+	// property read must yield the string directly, so store it as a plain
+	// string member instead of a function.
+	static void localconnection_constructor(const fn_call& fn)
+	{
+		if (fn.this_ptr != NULL)
+		{
+			fn.this_ptr->set_member("domain", as_value("localhost"));
+			return;
+		}
+		gc_ptr<as_object> lc = new as_object(fn.get_player());
+		lc->set_member("domain", as_value("localhost"));
+		fn.result->set_as_object(lc.get_ptr());
+	}
+
 	// Helper to create a class object
 	static as_object* create_class(player* player, const char* name, as_object* prototype)
 	{
@@ -225,6 +244,7 @@ namespace gameswf
 		global->set_member("SecurityErrorEvent", as_value(security_error_event_class));
 
 		as_object* context_menu_event_class = create_class(player, "ContextMenuEvent", new as_object(player));
+		context_menu_event_class->set_member("MENU_SELECT", as_value("menuSelect"));
 		context_menu_event_class->set_member("MENU_ITEM_SELECT", as_value("menuItemSelect"));
 		context_menu_event_class->set_member("MENU_ITEM_ENABLE", as_value("menuItemEnable"));
 		context_menu_event_class->set_member("MENU_ITEM_SELECT_ENABLE", as_value("menuItemSelectEnable"));
@@ -355,7 +375,12 @@ namespace gameswf
 		net_pkg->set_member("URLRequest", as_value());
 		net_pkg->set_member("URLVariables", as_value());
 		net_pkg->set_member("SharedObject", as_value());
-		net_pkg->set_member("LocalConnection", as_value());
+		// LocalConnection: the shell SWF does `new LocalConnection()` and
+		// reads .domain to decide branding URLs; registered as undefined it
+		// returned NULL and the whole chain (flashCurrentDomainName,
+		// btn_uri) collapsed.
+		global->set_member("LocalConnection", as_value(localconnection_constructor));
+		net_pkg->set_member("LocalConnection", as_value(localconnection_constructor));
 		net_pkg->set_member("Socket", as_value());
 		net_pkg->set_member("XMLSocket", as_value());
 		flash_pkg->set_member("net", as_value(net_pkg));

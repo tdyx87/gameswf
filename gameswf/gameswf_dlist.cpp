@@ -376,7 +376,7 @@ namespace gameswf
 			return;
 		}
 		
-		int	index = find_display_index(depth);
+int	index = find_display_index(depth);
 		if (index < 0
 		    || index >= size
 		    || get_character(index)->get_depth() != depth)

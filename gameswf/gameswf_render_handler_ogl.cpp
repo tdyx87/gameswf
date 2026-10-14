@@ -1145,7 +1145,7 @@ struct render_handler_ogl : public gameswf::render_handler
 	void	fill_style_disable(int fill_side)
 	// Don't fill on the {0 == left, 1 == right} side of a path.
 	{
-		assert(fill_side >= 0 && fill_side < 2);
+		assert(fill_side >= 0 && fill_side <= 2);
 
 		m_current_styles[fill_side].disable();
 	}
@@ -1162,7 +1162,7 @@ struct render_handler_ogl : public gameswf::render_handler
 	// Set fill style for the left interior of the shape.  If
 	// enable is false, turn off fill for the left interior.
 	{
-		assert(fill_side >= 0 && fill_side < 2);
+		assert(fill_side >= 0 && fill_side <= 2);
 
 		m_current_styles[fill_side].set_color(m_current_cxform.transform(color));
 	}
@@ -1179,7 +1179,7 @@ struct render_handler_ogl : public gameswf::render_handler
 	void	fill_style_bitmap(int fill_side, gameswf::bitmap_info* bi, const gameswf::matrix& m,
 		bitmap_wrap_mode wm, bitmap_blend_mode bm)
 	{
-		assert(fill_side >= 0 && fill_side < 2);
+		assert(fill_side >= 0 && fill_side <= 2);
 		m_current_styles[fill_side].set_bitmap(bi, m, wm, m_current_cxform);
 	}
 	

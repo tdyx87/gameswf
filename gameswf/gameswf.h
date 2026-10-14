@@ -795,6 +795,17 @@ namespace gameswf
 			BLEND_HARDLIGHT
 		};
 
+		// Fill-style slots used by fill_style_color(), fill_style_bitmap()
+		// and fill_style_disable() below.  LINE_STYLE is the same slot the
+		// line_style_*() entry points write to, so a stroke fill style can
+		// be pushed there.
+		enum fill_side_slot
+		{
+			FILL_SIDE_LEFT = 0,
+			FILL_SIDE_RIGHT = 1,
+			FILL_SIDE_LINE = 2
+		};
+
 		virtual void	fill_style_disable(int fill_side) = 0;
 		virtual void	fill_style_color(int fill_side, const rgba& color) = 0;
 		virtual void	fill_style_bitmap(int fill_side, bitmap_info* bi, const matrix& m,

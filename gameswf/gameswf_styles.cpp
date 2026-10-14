@@ -40,6 +40,7 @@ namespace gameswf
 
 	fill_style::fill_style() :
 		m_type(0),
+		m_focal(0.f),
 		m_gradient_bitmap_info(0),
 		m_bitmap_character(0)
 	{
@@ -136,32 +137,60 @@ namespace gameswf
 		else
 		if (m_type == 0x13)
 		{
-			
+			// 0x13: focal radial gradient (Flash 8, DefineShape4).
+			// Store the gradient records and build a gradient bitmap the same
+			// way we do for a plain radial fill, offset by the focal point.
+			// Previously the records were parsed and thrown away, so apply()
+			// pushed nothing into the renderer and the shape was painted with
+			// whatever fill style was still active -- i.e. solid black.
 			assert( tag_type == 83 );
-			// focal gradient fill, Flash 8
-			// parsed but not implemented yet
 
 			matrix	input_matrix;
 			input_matrix.read(in);
 
-			// 'spread_mode' and 'interpolation_mode' are not used for now
-			// and so they are commented out
-//			in->align();
-//			int spread_mode = in->read_uint(2);
-//			int interpolation_mode = in->read_uint(2);
-//			int gradient_count = in->read_uint(4);
+			m_gradient_matrix.set_identity();
+			m_gradient_matrix.concatenate_translation(32.f, 32.f);
+			m_gradient_matrix.concatenate_scale(1.0f / 512.0f);
 
+			matrix	m;
+			m.set_inverse(input_matrix);
+			m_gradient_matrix.concatenate(m);
+
+			// SWF 8 and later supports up to 15 gradient control points
 			int num_gradients = in->read_u8() & 0x0F;
-
-			for (int i = 0; i < num_gradients; i++)
+			if (num_gradients < 1 || num_gradients > 15)
 			{
-				int ratio = in->read_u8();
-				UNUSED(ratio);
-				rgba color;
-				color.read_rgba(in);
+				log_error("Invalid focal-gradient record count: %d\n", num_gradients);
+				num_gradients = 1;
 			}
 
-			in->read_u16(); //Fixed 8
+			m_gradients.resize(num_gradients);
+			for (int i = 0; i < num_gradients; i++)
+			{
+				m_gradients[i].read(in, tag_type);
+			}
+
+			// FIXED8 focal point, -1.0 .. 1.0 along the gradient's x axis
+			m_focal = (float) (Sint16) in->read_u16() / 256.0f;
+			if (m_focal < -1.0f) m_focal = -1.0f;
+			if (m_focal > 1.0f) m_focal = 1.0f;
+
+			m_color = m_gradients[0].m_color;
+
+			if (md->get_create_bitmaps() == DO_LOAD_BITMAPS)
+			{
+				m_gradient_bitmap_info = create_gradient_bitmap();
+			}
+			else
+			{
+				m_gradient_bitmap_info = render::create_bitmap_info_empty();
+			}
+
+			// Make sure our movie_def_impl knows about this bitmap.
+			md->add_bitmap_info(m_gradient_bitmap_info.get_ptr());
+
+			IF_VERBOSE_PARSE(log_msg("  focal gradient: num_gradients = %d focal = %.3f\n",
+				num_gradients, m_focal));
 		}
 		else
 		if (m_type >= 0x40 && m_type <= 0x43)
@@ -197,7 +226,7 @@ namespace gameswf
 	// Ratio is in [0, 255].
 	{
 		assert(ratio >= 0 && ratio <= 255);
-		assert(m_type == 0x10 || m_type == 0x12);
+		assert(m_type == 0x10 || m_type == 0x12 || m_type == 0x13);
 		assert(m_gradients.size() > 0);
 
 		if (ratio < m_gradients[0].m_ratio)
@@ -227,7 +256,7 @@ namespace gameswf
 	// Make a bitmap_info* corresponding to our gradient.
 	// We can use this to set the gradient fill style.
 	{
-		assert(m_type == 0x10 || m_type == 0x12);
+		assert(m_type == 0x10 || m_type == 0x12 || m_type == 0x13);
 
 		image::rgba*	im = NULL;
 
@@ -242,22 +271,67 @@ namespace gameswf
 				im->set_pixel(i, 0, sample.m_r, sample.m_g, sample.m_b, sample.m_a);
 			}
 		}
-		else if (m_type == 0x12)
+		else if (m_type == 0x12 || m_type == 0x13)
 		{
-			// Radial gradient.
+			// Radial gradient; type 0x13 additionally has a focal point, i.e.
+			// the centre of the ramp is pulled off-center by m_focal.
 			im = image::create_rgba(64, 64);
+
+			float	radius = (im->m_height - 1) / 2.0f;
+			float	focal_x = (m_type == 0x13) ? m_focal : 0.0f;
 
 			for (int j = 0; j < im->m_height; j++)
 			{
 				for (int i = 0; i < im->m_width; i++)
 				{
-					float	radius = (im->m_height - 1) / 2.0f;
 					float	y = (j - radius) / radius;
 					float	x = (i - radius) / radius;
-					int	ratio = (int) floorf(255.5f * sqrt(x * x + y * y));
+					int	ratio;
+
+					if (focal_x == 0.0f)
+					{
+						ratio = (int) floorf(255.5f * sqrt(x * x + y * y));
+					}
+					else
+					{
+						// Walk the ray from the focal point P=(focal_x,0)
+						// through the sample; find where it leaves the unit
+						// circle (parameter s) and ramp by 1/s, so the value
+						// is 0 at P and 1 on the rim.
+						float	dx = x - focal_x;
+						float	dy = y;
+						float	dd = dx * dx + dy * dy;
+						if (dd < 1e-12f)
+						{
+							ratio = 0;
+						}
+						else
+						{
+							float	pd = focal_x * dx;
+							float	disc = pd * pd - dd * (focal_x * focal_x - 1.0f);
+							if (disc < 0.0f)
+							{
+								disc = 0.0f;
+							}
+							float	s = (-pd + sqrtf(disc)) / dd;
+							if (s <= 1e-6f)
+							{
+								ratio = 255;
+							}
+							else
+							{
+								ratio = (int) floorf(255.5f / s);
+							}
+						}
+					}
+
 					if (ratio > 255)
 					{
 						ratio = 255;
+					}
+					if (ratio < 0)
+					{
+						ratio = 0;
 					}
 					rgba	sample = sample_gradient( ratio );
 					im->set_pixel(i, j, sample.m_r, sample.m_g, sample.m_b, sample.m_a);
@@ -281,10 +355,11 @@ namespace gameswf
 			// 0x00: solid fill
 			render::fill_style_color(fill_side, m_color);
 		}
-		else if (m_type == 0x10 || m_type == 0x12)
+		else if (m_type == 0x10 || m_type == 0x12 || m_type == 0x13)
 		{
 			// 0x10: linear gradient fill
 			// 0x12: radial gradient fill
+			// 0x13: focal radial gradient fill
 
 			if (m_gradient_bitmap_info == NULL)
 			{
@@ -301,7 +376,7 @@ namespace gameswf
 					render_handler::WRAP_CLAMP, bm);
 			}
 		}
-		else if (m_type >= 0x40 || m_type <= 0x43)
+		else if (m_type >= 0x40 && m_type <= 0x43)
 		{
 			// bitmap fill (either tiled or clipped)
 			bitmap_info*	bi = NULL;
@@ -328,10 +403,31 @@ namespace gameswf
 					}
 				}
 			}
+			if (bi == NULL)
+			{
+				// We have nothing drawable for this style.  Pushing nothing
+				// at all would leave whatever fill was last applied active
+				// (that is what painted focal-gradient shapes black), so
+				// explicitly turn this side off instead.
+				static int s_warned[256] = { 0 };
+				if (s_warned[m_type] == 0)
+				{
+					s_warned[m_type] = 1;
+					log_error("fill style type 0x%X has no bitmap; fill side disabled\n", m_type);
+				}
+				render::fill_style_disable(fill_side);
+			}
 		}
 		else
 		{
-			assert(0);
+			// Unknown style.  Never leave a stale colour in the renderer.
+			static int s_unknown[256] = { 0 };
+			if (s_unknown[m_type] == 0)
+			{
+				s_unknown[m_type] = 1;
+				log_error("unsupported fill style type 0x%X; fill side disabled\n", m_type);
+			}
+			render::fill_style_disable(fill_side);
 		}
 	}
 
@@ -367,6 +463,9 @@ namespace gameswf
 			m_gradients[j].m_color.set_lerp(a.m_gradients[j].m_color, b.m_gradients[j].m_color, t);
 		}
 		m_gradient_bitmap_info = NULL;
+
+		// focal radial gradient offset (type 0x13)
+		m_focal = a.m_focal + (b.m_focal - a.m_focal) * t;
 
 		// fill style bitmap ID
 		m_bitmap_character = a.m_bitmap_character;
@@ -427,7 +526,7 @@ namespace gameswf
 
 			in->read_uint(5); // Reserved UB[5] Must be 0.
 
-			// If 1, stroke will not be closed if the stroke’s last point
+			// If 1, stroke will not be closed if the strokeï¿½s last point
 			// matches its first point. Flash Player will apply caps instead of a join.
 			m_noclose = in->read_uint(1) == 1 ? true : false;
 
@@ -461,7 +560,18 @@ namespace gameswf
 	void	line_style::apply(float ratio) const
 	{
 		UNUSED(ratio);
-		render::line_style_color(m_color);
+		if (m_has_fill_flag == false)
+		{
+			render::line_style_color(m_color);
+		}
+		else
+		{
+			// LineStyle2/Shape4 strokes can carry a full fill style (solid,
+			// gradient or bitmap).  Push it into the renderer the same way
+			// fill styles are, otherwise the stroke falls back to whatever
+			// colour was last active.
+			m_fill_style.apply(render_handler::FILL_SIDE_LINE, ratio, render_handler::BLEND_NORMAL);
+		}
 		render::line_style_width(m_width);
 	}
 
