@@ -40,6 +40,8 @@ namespace gameswf
 		float	m_text_height;
 		bool	m_has_x_offset;
 		bool	m_has_y_offset;
+		bool	m_has_color;	// TEXTRECORD HasTextColor: when set, tint the
+					// glyph instead of using its own colours
 		float m_scale;
 		float m_leading;
 
@@ -52,6 +54,7 @@ namespace gameswf
 			m_text_height(1.0f),
 			m_has_x_offset(false),
 			m_has_y_offset(false),
+			m_has_color(false),
 			m_scale(0),
 			m_leading(0)
 		{

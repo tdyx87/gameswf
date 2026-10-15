@@ -98,6 +98,11 @@ namespace gameswf
 		array<line_style>	dummy_line_style;
 		dummy_style.resize(1);
 
+		// Scratch fill-style list handed to shape_character_def::display() for
+		// each glyph.  Font glyph shapes are parsed without styles, so this
+		// array is what actually decides how a letter is painted.
+		array<fill_style>	glyph_fills;
+
 		matrix	mat = inst->get_world_matrix();
 		mat.concatenate(this_mat);
 
@@ -228,7 +233,33 @@ namespace gameswf
 				else
 			if (g.m_shape_glyph != NULL)
 			{
-				g.m_shape_glyph->display(mat, cx, pixel_scale, dummy_style, dummy_line_style, render_handler::BLEND_NORMAL);
+				// Font glyph shapes are read with with_style=false, so they carry no
+				// fill/line style definitions of their own and the styles must be
+				// supplied here.  Handing shape_character_def::display() a
+				// single-element dummy array (see above) left every fill index
+				// >= 1 pointing off the end of the array, so those meshes were
+				// dropped and the lettering came out hollow - or, when the index
+				// was 0 as well, not drawn at all.
+				const array<fill_style>& gf = g.m_shape_glyph->get_fill_styles();
+				const array<line_style>&  gl = g.m_shape_glyph->get_line_styles();
+				// NumFillBits is 1 for these glyphs, so two slots cover the body
+				// plus its outline.
+				const size_t n_styles = (gf.size() > 2) ? gf.size() : 2;
+				glyph_fills.resize(n_styles);
+				for (size_t k = 0; k < n_styles; k++)
+				{
+					if (k < gf.size())
+					{
+						glyph_fills[k] = gf[k];
+					}
+					if (rec.m_style.m_has_color)
+					{
+						// TEXTRECORD supplied a colour: tint the glyph, but keep
+						// its style layout so the outline survives.
+						glyph_fills[k].set_color(rec.m_style.m_color);
+					}
+				}
+				g.m_shape_glyph->display(mat, cx, pixel_scale, glyph_fills, gl, render_handler::BLEND_NORMAL);
 			}
 			else
 			if (g.m_glyph_index >= 0)
@@ -237,7 +268,24 @@ namespace gameswf
 				shape_character_def* sh = fnt->get_glyph_by_index(g.m_glyph_index);
 				if (sh)
 				{
-					sh->display(mat, cx, pixel_scale, dummy_style, dummy_line_style, render_handler::BLEND_NORMAL);
+					const array<fill_style>& gf = sh->get_fill_styles();
+					const array<line_style>& gl = sh->get_line_styles();
+					// See above: glyph shapes have no styles of their own, so
+					// supply them here or every mesh is dropped.
+					const size_t n_styles = (gf.size() > 2) ? gf.size() : 2;
+					glyph_fills.resize(n_styles);
+					for (size_t k = 0; k < n_styles; k++)
+					{
+						if (k < gf.size())
+						{
+							glyph_fills[k] = gf[k];
+						}
+						if (rec.m_style.m_has_color)
+						{
+							glyph_fills[k].set_color(rec.m_style.m_color);
+						}
+					}
+					sh->display(mat, cx, pixel_scale, glyph_fills, gl, render_handler::BLEND_NORMAL);
 				}
 			}
 
@@ -294,6 +342,10 @@ namespace gameswf
 				bool	has_color = (first_byte >> 2) & 1;
 				bool	has_y_offset = (first_byte >> 1) & 1;
 				bool	has_x_offset = (first_byte >> 0) & 1;
+
+				// HasTextColor 0 means the glyph keeps the fill styles baked
+				// into its shape; only 1 asks us to tint it.
+				style.m_has_color = has_color ? true : false;
 
 				IF_VERBOSE_PARSE(log_msg("  text style change\n"));
 
