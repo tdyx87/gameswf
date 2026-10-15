@@ -84,6 +84,12 @@ namespace gameswf
 
 		void	display(const base_fill_style& style, float ratio, render_handler::bitmap_blend_mode bm) const;
 
+		int		get_triangle_count() const
+		{
+			int	strip_pts = (int) (m_triangle_strip.size() / 2);
+			return (strip_pts > 2 ? strip_pts - 2 : 0) + (int) (m_triangle_list.size() / 6);
+		}
+
 		void	output_cached_data(tu_file* out);
 		void	input_cached_data(tu_file* in);
 	private:

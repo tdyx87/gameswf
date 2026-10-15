@@ -459,6 +459,16 @@ namespace tesselate
 	void	end_shape()
 	{
 		output_current_segments();
+
+		// Notify the accepter of the sub-shape boundary (SWF NewStyles),
+		// so it can flush this sub-shape's fills before later sub-shapes
+		// add theirs.  Without this, strokes recorded between fill blocks
+		// would end up painted over fills that Flash draws after them.
+		if (s_accepter)
+		{
+			s_accepter->end_shape();
+		}
+
 		s_accepter = NULL;
 		s_current_path.clear();
 	}

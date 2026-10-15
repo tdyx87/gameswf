@@ -725,6 +725,12 @@ namespace gameswf
 			void	flush()
 			// Push our strips into the mesh set.
 			{
+				if (m_strips.size() == 0)
+				{
+					// Nothing collected for this sub-shape; don't create an
+					// empty layer.
+					return;
+				}
 				if (m_new_layer) {
 					m->new_layer();
 					m_new_layer = false;
@@ -739,9 +745,16 @@ namespace gameswf
 					
 					delete s;
 				}
+				m_strips.clear();
 			}
 
 			void end_shape() {
+				// Sub-shape (NewStyles) boundary: push this sub-shape's fill
+				// meshes now, so strokes recorded after them get their own
+				// layer below, and fills of the next sub-shape paint on top
+				// of earlier sub-shape strokes -- the order Flash renders
+				// shape record streams in.
+				flush();
 				m_new_layer = true;
 			}
 		};
@@ -855,6 +868,54 @@ namespace gameswf
 	{
 		assert(m_error_tolerance > 0);
 
+		// Optional diagnostics, all env-gated (no effect unless set):
+		//   GAMESWF_MESH_LOG=n     log structure of the first n mesh_sets
+		//                           (layers / mesh tris / strips / styles)
+		//   GAMESWF_ONLY_STYLE=k   render only fill style k
+		//   GAMESWF_SKIP_STYLE=k   skip fill style k
+		static int s_only_style = -2;
+		static int s_skip_style = -2;
+		static int s_mesh_log = -2;
+		if (s_only_style == -2)
+		{
+			const char* e = getenv("GAMESWF_ONLY_STYLE");
+			s_only_style = e ? atoi(e) : -1;
+			e = getenv("GAMESWF_SKIP_STYLE");
+			s_skip_style = e ? atoi(e) : -1;
+			e = getenv("GAMESWF_MESH_LOG");
+			s_mesh_log = e ? atoi(e) : 0;
+		}
+		if (s_mesh_log > 0)
+		{
+			static int s_logged = 0;
+			if (s_logged < s_mesh_log)
+			{
+				s_logged++;
+				log_msg("mesh_set[%d]: layers=%d fills=%d lines=%d\n", s_logged,
+					(int) m_layers.size(), (int) fills.size(), (int) line_styles.size());
+				for (int j = 0; j < (int) m_layers.size(); j++)
+				{
+					const layer& lay = m_layers[j];
+					for (int i = 0; i < (int) lay.m_meshes.size(); i++)
+					{
+						if (lay.m_meshes[i])
+						{
+							log_msg("  layer %d: mesh[%d] tris=%d\n",
+								j, i, lay.m_meshes[i]->get_triangle_count());
+						}
+					}
+					log_msg("  layer %d: line_strips=%d\n", j, (int) lay.m_line_strips.size());
+				}
+				for (int i = 0; i < (int) line_styles.size(); i++)
+				{
+					log_msg("  line_style[%d] width=%d color=%d,%d,%d,%d\n", i,
+						(int) line_styles[i].get_width(),
+						line_styles[i].get_color().m_r, line_styles[i].get_color().m_g,
+						line_styles[i].get_color().m_b, line_styles[i].get_color().m_a);
+				}
+			}
+		}
+
 		// Setup transforms.
 		render::set_matrix(mat);
 		render::set_cxform(cx);
@@ -866,6 +927,12 @@ namespace gameswf
 			// Dump meshes into renderer, one mesh per style.
 			for (int i = 0; i < l.m_meshes.size(); i++) {
 				if (l.m_meshes[i]) {
+					if (s_only_style >= 0 && i != s_only_style) {
+						continue;
+					}
+					if (s_skip_style >= 0 && i == s_skip_style) {
+						continue;
+					}
 					// The mesh array is grown to fit the highest fill style
 					// index the shape records refer to, which is not
 					// necessarily within the style list we actually parsed.
@@ -890,6 +957,9 @@ namespace gameswf
 			// Dump line-strips into renderer.
 			{for (int i = 0; i < l.m_line_strips.size(); i++)
 			{
+				if (s_only_style >= 0) {
+					break;	// fill-only diagnostic render: no strokes.
+				}
 				int	style = l.m_line_strips[i]->get_style();
 				if (style < (int) line_styles.size()) {
 					l.m_line_strips[i]->display(line_styles[style], 1.0f);

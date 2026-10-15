@@ -32,6 +32,12 @@ namespace gameswf
 			virtual ~trapezoid_accepter() {}
 			virtual void	accept_trapezoid(int style, const trapezoid& tr) = 0;
 			virtual void	accept_line_strip(int style, const point coords[], int coord_count) = 0;
+
+			// Called at each sub-shape boundary (SWF NewStyles markers).
+			// Lets the accepter flush what it has collected for the previous
+			// sub-shape, so later sub-shape fills paint over earlier sub-shape
+			// strokes -- matching the order Flash renders shape records in.
+			virtual void	end_shape() {}
 		};
 
 		// A shape has one or more paths.  The paths in a
