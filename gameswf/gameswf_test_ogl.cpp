@@ -103,7 +103,13 @@ static int s_delay = 10;
 // by default it's used the simplest and the fastest edge antialiasing method
 // if you have modern video card you can use full screen antialiasing
 // full screen antialiasing level may be 2,4,8,16, ...
-static int s_aa_level = 1;
+// Antialiasing: 4x MSAA by default.  Vector art is the bulk of what this
+	// player draws and without MSAA every edge is hard-aliased, which is the
+	// single biggest reason our output looks coarser than the Flash Player's.
+	// Measured against flashplayer.exe, 4x MSAA cut the "content present in
+	// Flash but flat in ours" pixels by ~3.6x.  Pass "-a 1" to turn it off,
+	// or "-a N" to pick a different sample count.
+	static int s_aa_level = 4;
 
 static bool s_background = true;
 static bool s_measure_performance = false;
@@ -378,7 +384,7 @@ int	main(int argc, char *argv[])
 	// loop frame: the movie timeline advances on real time (delta_t comes
 	// from tu_timer), so loop-frame schedules land at a different movie
 	// state on every machine / build / trace level and are not reproducible.
-struct scheduled_click_t { int frame, x, y; int time_ms; int press_frame; bool fired; bool aim; tu_string want_name; };
+struct scheduled_click_t { int frame, x, y; int time_ms; int press_frame; bool fired; bool aim; tu_string want_name; int hover_frames; int hover_frame; };
 	scheduled_click_t	auto_clicks[24];
 	int	auto_click_count = 0;
 bool	dump_tree = false;
@@ -447,6 +453,8 @@ int	dump_tree_ms = -1;
 				auto_clicks[auto_click_count].press_frame = -1;
 				auto_clicks[auto_click_count].fired = false;
 				auto_clicks[auto_click_count].want_name = "";
+				auto_clicks[auto_click_count].hover_frames = 0;
+				auto_clicks[auto_click_count].hover_frame = -1;
 				auto_click_count++;
 				arg += 3;
 				continue;
@@ -475,6 +483,8 @@ int	dump_tree_ms = -1;
 				auto_clicks[auto_click_count].press_frame = -1;
 				auto_clicks[auto_click_count].fired = false;
 				auto_clicks[auto_click_count].want_name = "";
+				auto_clicks[auto_click_count].hover_frames = 0;
+				auto_clicks[auto_click_count].hover_frame = -1;
 				auto_click_count++;
 				arg += 3;
 				continue;
@@ -627,6 +637,8 @@ int	dump_tree_ms = -1;
 				auto_clicks[auto_click_count].fired = false;
 				auto_clicks[auto_click_count].aim = false;
 				auto_clicks[auto_click_count].want_name = argv[arg + 1];
+				auto_clicks[auto_click_count].hover_frames = 0;
+				auto_clicks[auto_click_count].hover_frame = -1;
 				auto_click_count++;
 				arg += 3;
 				continue;
@@ -661,6 +673,8 @@ int	dump_tree_ms = -1;
 				auto_clicks[auto_click_count].fired = false;
 				auto_clicks[auto_click_count].aim = true;
 				auto_clicks[auto_click_count].want_name = argv[arg + 1];
+				auto_clicks[auto_click_count].hover_frames = 0;
+				auto_clicks[auto_click_count].hover_frame = -1;
 				auto_click_count++;
 				arg += 1;
 				continue;
@@ -1599,37 +1613,55 @@ int	dump_tree_ms = -1;
 							c.press_frame = s_click_frame;
 						}
 						frame = c.press_frame;
-					}
+				}
 
-					if (c.time_ms >= 0)
+				if (c.time_ms >= 0)
+				{
+					// Wall-clock scheduled (-clkms): wait until the movie has
+					// been running long enough, then press; release two
+					// loop frames later.
+					int now_ms = (int) (ticks - start_ticks);
+					if (!c.fired)
 					{
-						// Wall-clock scheduled (-clkms): wait until the movie has
-						// been running long enough, then press; release two
-						// loop frames later.
-						int now_ms = (int) (ticks - start_ticks);
-						if (!c.fired)
+						// Park the pointer on the target as soon as we get
+						// near the trigger time, and keep it there so the
+						// roll-over update can pick the entity up.  Count
+						// FRAMES, not milliseconds: a fixed 100 ms lead is
+						// shorter than a single frame whenever the movie runs
+						// slowly (heavy FB dumps, a loaded machine), and the
+						// hover then never lands at all before the press --
+						// which is why -clkms clicks used to silently do
+						// nothing.
+						if (now_ms >= c.time_ms - 100)
 						{
-							// Hover for ~100ms before the trigger so the
-							// roll-over update has already picked a target.
-							if (now_ms >= c.time_ms - 100)
+							mouse_x = c.x;
+							mouse_y = c.y;
+							if (s_click_frame != c.hover_frame)
 							{
-								mouse_x = c.x;
-								mouse_y = c.y;
+								c.hover_frames++;
+								c.hover_frame = s_click_frame;
 							}
-							if (now_ms < c.time_ms)
-							{
-								continue;
-							}
-							// Arm on this frame and fall through, so the
-							// press really happens now.  Continuing here
-							// used to skip the press and still fire the
-							// release two frames later, so -clkms clicks
-							// never reached the game at all.
-							c.fired = true;
-							c.press_frame = s_click_frame;
 						}
-						frame = c.press_frame;
+						if (now_ms < c.time_ms)
+						{
+							continue;
+						}
+						if (c.hover_frames < 2)
+						{
+							// Not enough hover frames yet; wait rather than
+							// pressing into a movie that has no target.
+							continue;
+						}
+						// Arm on this frame and fall through, so the
+						// press really happens now.  Continuing here
+						// used to skip the press and still fire the
+						// release two frames later, so -clkms clicks
+						// never reached the game at all.
+						c.fired = true;
+						c.press_frame = s_click_frame;
 					}
+					frame = c.press_frame;
+				}
 
 					// Hover a few frames before pressing.  root::generate_mouse_button_events
 					// only records m_active_entity while the button is UP (ROLL_OVER), so a
