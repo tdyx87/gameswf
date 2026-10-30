@@ -12,7 +12,6 @@
 
 namespace gameswf
 {
-
 	void metadata_info::read(stream* in, abc_def* abc)
 	{
 		// metadata_info format:
@@ -156,7 +155,54 @@ namespace gameswf
 			trait->read(in, abc);
 			m_trait[i] = trait;
 		}
+
+		// Temporary diagnostic: dump the instance traits of the classes that
+		// drive the bath/wash step so the mouse handlers can be traced.
+		{
+			const char* cn = abc->get_multiname(m_name);
+			if (cn != NULL)
+			{
+				// The wash-step class is named after the spray head
+				// (Chinese class names are stored as mojibake in the
+				// console, so match on the constructor method id).
+				bool interesting = (m_iinit == 957 || m_iinit == 914 || m_iinit == 731 || m_iinit == 828 || m_iinit == 872 || m_iinit == 912
+					|| m_iinit == 874 || m_iinit == 830
+					|| strstr(cn, "GameStep") != NULL
+					|| strstr(cn, "HomeStep") != NULL
+					|| strstr(cn, "EndStep") != NULL);
+				if (!interesting)
+				{
+					for (i = 0; i < n; i++)
+					{
+						traits_info* ti = m_trait[i].get();
+						const char* tn = abc->get_multiname(ti->m_name);
+						if (tn != NULL && strcmp(tn, "onOneTargetDownUp") == 0)
+						{
+							interesting = true;
+							break;
+						}
+					}
+				}
+				if (interesting)
+				{
+					fprintf(stderr, "TRAITDUMP class %s super=%s iinit=%d traits=%d\n",
+						cn, abc->get_multiname(m_super_name), m_iinit, n);
+					for (i = 0; i < n; i++)
+					{
+						traits_info* ti = m_trait[i].get();
+						int mid = (ti->m_kind == traits_info::Trait_Method
+							|| ti->m_kind == traits_info::Trait_Getter
+							|| ti->m_kind == traits_info::Trait_Setter)
+							? ti->trait_method.m_method : -1;
+						fprintf(stderr, "  trait '%s' kind=%d method=%d\n",
+							abc->get_multiname(ti->m_name), (int)ti->m_kind, mid);
+					}
+					fflush(stderr);
+				}
+			}
+		}
 	}
+
 
 	void class_info::read(stream* in, abc_def* abc)
 	{
@@ -188,6 +234,34 @@ namespace gameswf
 			traits_info* trait = new traits_info();
 			trait->read(in, abc);
 			m_trait[i] = trait;
+		}
+
+		// Temporary diagnostic: dump script traits that carry the bath/wash
+		// handlers (onOneTargetDownUp / lv33 / onMM / onAlphaMove).
+		{
+			for (int i = 0; i < n; i++)
+			{
+				traits_info* ti = m_trait[i].get();
+				const char* tn = abc->get_multiname(ti->m_name);
+				if (tn != NULL && (strcmp(tn, "onOneTargetDownUp") == 0
+					|| strcmp(tn, "lv33") == 0 || strcmp(tn, "onMM") == 0
+					|| strcmp(tn, "onAlphaMove") == 0))
+				{
+					fprintf(stderr, "SCRIPTDUMP init=%d trait '%s' kind=%d\n",
+						m_init, tn, (int)ti->m_kind);
+					for (int j = 0; j < n; j++)
+					{
+						traits_info* tj = m_trait[j].get();
+						int mj = (tj->m_kind == traits_info::Trait_Method
+							|| tj->m_kind == traits_info::Trait_Getter
+							|| tj->m_kind == traits_info::Trait_Setter)
+							? tj->trait_method.m_method : -1;
+						fprintf(stderr, "  trait '%s' kind=%d method=%d\n",
+							abc->get_multiname(tj->m_name), (int)tj->m_kind, mj);
+					}
+					fflush(stderr);
+				}
+			}
 		}
 	}
 

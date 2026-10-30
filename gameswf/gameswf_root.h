@@ -125,6 +125,11 @@ namespace gameswf
 	void		dump_named_tree();
 	void		trace_outfit_layers();
 	void		pick_report_at(float x, float y);
+	// List every named clip with its true stage rect and whether a press
+	// there would land on it (i.e. whether a user could grab it).
+	void		list_pressable();
+	void		list_pressable_walk(character* ch, int depth);
+	void		dump_tree();
 		float	get_frame_rate() const;
 		void	set_frame_rate(float rate);
 

@@ -13,6 +13,7 @@
 #include "gameswf/gameswf.h"
 #include "gameswf/gameswf_root.h"
 #include <typeinfo>
+#include <stdlib.h>
 
 
 
@@ -470,7 +471,7 @@ int	index = find_display_index(depth);
 	{
 		bool masked = false;
 		int highest_masked_layer = 0;
-		
+
 		//log_msg("number of objects to be drawn %i\n", m_display_object_array.size());
 		
 		for (int i = 0; i < m_display_object_array.size(); i++)
@@ -484,6 +485,37 @@ int	index = find_display_index(depth);
 			{
 				// Don't display.
 				continue;
+			}
+
+			// GAMESWF_HIDE=id[,id...] skips those character ids entirely
+			// (diagnostic: attribute on-screen pixels to a character by
+			// hiding it and diffing the framebuffer).
+			{
+				static int s_hide[16];
+				static int s_hide_n = -1;
+				if (s_hide_n < 0)
+				{
+					s_hide_n = 0;
+					const char* e = getenv("GAMESWF_HIDE");
+					if (e && e[0])
+					{
+						while (s_hide_n < 16 && *e)
+						{
+							s_hide[s_hide_n++] = atoi(e);
+							while (*e && *e != ',' && *e != ' ') e++;
+							if (*e == ',' || *e == ' ') e++;
+						}
+					}
+				}
+				bool hide = false;
+				for (int h = 0; h < s_hide_n; h++)
+				{
+					if (s_hide[h] == ch->get_id()) { hide = true; break; }
+				}
+				if (hide)
+				{
+					continue;
+				}
 			}
 
 			// check whether a previous mask should be disabled

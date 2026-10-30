@@ -12,6 +12,7 @@
 
 #include "gameswf/gameswf_action.h"
 #include "gameswf/gameswf_impl.h"
+#include <typeinfo>
 #include "gameswf/gameswf_stream.h"
 #include "gameswf/gameswf_sprite_def.h"
 #include "gameswf/gameswf_sprite.h"
@@ -22,7 +23,8 @@
 #include "gameswf/gameswf_as_classes/as_array.h"
 
 // Timeline / event diagnostics used while debugging SWF playback.
-// Very verbose: keep compiled out unless actively debugging.
+// Verbose [GOTO]/[DIAG] tracing: compiled out by default; enable with
+// -DSPRITE_TRACE_ENABLED=1 (CMake: -DGAMESWF_SPRITE_TRACE=ON) while debugging.
 #ifndef SPRITE_TRACE_ENABLED
 #define SPRITE_TRACE_ENABLED 0
 #endif
@@ -37,6 +39,24 @@ namespace gameswf
 {
 
 	struct as_mcloader;
+
+	int	g_efl_reason = 0;
+
+	// Per-frame sprite tracing.  It used to be unconditional, and a fprintf +
+	// fflush on stderr every frame (several per frame, in fact) dragged the
+	// player down to a handful of fps.  That is not just slow: AS3 games time
+	// themselves with setTimeout/setInterval, so a starved frame rate makes
+	// their state machines take the wrong branch.  Off unless asked for.
+	bool	step_diag()
+	{
+		static int s = -1;
+		if (s < 0)
+		{
+			const char* e = getenv("GAMESWF_STEPDIAG");
+			s = (e != NULL && e[0] != 0 && strcmp(e, "0") != 0) ? 1 : 0;
+		}
+		return s == 1;
+	}
 
 	const char*	next_slash_or_dot(const char* word);
 	void	execute_actions(as_environment* env, const array<action_buffer*>& action_list);
@@ -111,6 +131,31 @@ namespace gameswf
 
 				m.transform(&ch_bound);
 
+				{
+					static int s_bd = -1;
+					if (s_bd < 0)
+					{
+						const char* e = getenv("GAMESWF_BOUNDDIAG");
+						s_bd = (e && e[0]) ? 1 : 0;
+					}
+					if (s_bd)
+					{
+						float v[4] = { ch_bound.m_x_min, ch_bound.m_x_max, ch_bound.m_y_min, ch_bound.m_y_max };
+						for (int q = 0; q < 4; q++)
+						{
+							if (!(v[q] * 0.0f == 0.0f))
+							{
+								fprintf(stderr, "[BOUNDDIAG] in id=%d name='%s' child id=%d name='%s' type=%s bound=(%g,%g)-(%g,%g)\n",
+									get_id(), get_name().c_str(), ch->get_id(), ch->get_name().c_str(),
+									typeid(*ch).name(),
+									(double)v[0], (double)v[2], (double)v[1], (double)v[3]);
+								fflush(stderr);
+								break;
+							}
+						}
+					}
+				}
+
 				bound->expand_to_rect(ch_bound);
 			}
 		}
@@ -145,6 +190,11 @@ namespace gameswf
 			}
 		}
 		m_play_state = s;
+		if (get_id() == 750)
+		{
+			fprintf(stderr, "[SPS] state=%d cur=%d\n", (int) s, m_current_frame);
+			fflush(stderr);
+		}
 	}
 
 	sprite_instance::play_state	sprite_instance::get_play_state() const
@@ -346,10 +396,15 @@ namespace gameswf
 				character* ch = m_display_list.get_character(i);
 				if (ch != NULL && ch->get_visible() && ch->get_mouse_target(te, p.m_x, p.m_y))
 				{
-					return true;
+					// Only accept a target if it has a name (Flash 3+ requires named objects for mouse events)
+					// or if it explicitly can handle mouse events
+					if (ch->get_name().size() > 0 || ch->can_handle_mouse_event())
+					{
+						return true;
+					}
+					}
 				}
 			}
-		}
 
 		if (enabled == false)
 		{
@@ -358,15 +413,19 @@ namespace gameswf
 			return false;
 		}
 
-		// No child claimed it: this sprite itself becomes the target
-		// when the point is within its bounds.  Bounds (bbox) rather
-		// than alpha: invisible-but-visible clips are valid Flash
-		// targets, e.g. drag-and-drop zone markers.
+		// No child claimed it as a deeper mouse target, but this sprite
+		// still owns the point when its own rendered geometry covers it.
+		// Test the actual shape (get_topmost_mouse_entity) rather than
+		// the bounding box: a bbox is far too coarse and lets large
+		// decorative overlays (big water/foam clips etc.) steal the
+		// mouseMove target from a smaller object drawn on top of them.
+		// Flash dispatches mouseMove to the object whose *shape* is under
+		// the cursor, so a rect test desynchronises e.target.name and
+		// breaks AS3 games that gate drag logic on it.
 		if (m_display_list.size() > 0)
 		{
-			rect bound;
-			get_bound(&bound);
-			if (bound.point_test((float) x, (float) y))
+			character* dummy = NULL;
+			if (get_topmost_mouse_entity(dummy, (float) x, (float) y) && get_name().size() > 0)
 			{
 				te = this;
 				return true;
@@ -406,6 +465,17 @@ namespace gameswf
 	{
 		// child movieclip frame rate is the same the root movieclip frame rate
 		// that's why it is not needed to analyze 'm_time_remainder'
+		// Temporary diagnostic: bath/wash clip (stepMC id=750) must advance every frame.
+		if (step_diag() && get_id() == 750)
+		{
+			fprintf(stderr, "[ADV0] stepMC state=%d cur=%d total=%d load=%d scripts=%d parent=%p\n",
+				(int) m_play_state, m_current_frame,
+				m_def != NULL ? m_def->get_frame_count() : -1,
+				(int) m_on_event_load_called,
+				m_script != NULL ? m_script->size() : 0,
+				(void*) get_parent());
+			fflush(stderr);
+		}
 		if (m_on_event_load_called == false)
 		{
 			// clip sprite onload 
@@ -445,6 +515,23 @@ namespace gameswf
 		if (m_play_state == PLAY)
 		{
 			int prev_frame = m_current_frame;
+			// Temporary diagnostic: report the frame advance of the
+			// bath/wash clip (it has many AS3 frame scripts).
+			if (step_diag() && m_script != NULL && m_script->size() > 4)
+			{
+				fprintf(stderr, "[ADV] clip=%p id=%d name='%s' cur=%d total=%d load=%d scripts=%d\n",
+					(void*) this, get_id(), get_name().c_str(), m_current_frame,
+					m_def != NULL ? m_def->get_frame_count() : -1,
+					(int) m_on_event_load_called, m_script->size());
+				fflush(stderr);
+			}
+			// Temporary diagnostic: watch the bath/wash clip frame counter.
+			if (step_diag() && get_id() == 750)
+			{
+				fprintf(stderr, "[INC] before cur=%d load=%d state=%d\n",
+					m_current_frame, (int) m_on_event_load_called, (int) m_play_state);
+				fflush(stderr);
+			}
 			if (m_on_event_load_called)
 			{
 				m_current_frame++;
@@ -454,10 +541,16 @@ namespace gameswf
 				}
 			}
 
+			if (step_diag() && get_id() == 750)
+			{
+				fprintf(stderr, "[INC] after cur=%d\n", m_current_frame);
+				fflush(stderr);
+			}
 			// Execute the current frame's tags.
 			// execute_frame_tags(0) already executed in dlist.cpp
 			if (m_current_frame != prev_frame)
 			{
+				g_efl_reason = 1;
 				// Macromedia Flash does not call remove display object tag
 				// for 1-st frame therefore we should do it for it :-)
 				if (m_current_frame == 0 && m_def->get_frame_count() > 1)
@@ -539,6 +632,17 @@ namespace gameswf
 			SPRITE_TRACE_FPRINTF( "[DIAG] execute_frame_tags: frame=%d state_only=%d dlist_size=%d this=%p(%s)\n", frame, state_only, m_display_list.size(), this, get_name().c_str());
 		}
 		IF_VERBOSE_ACTION(log_msg("AVM2: execute_frame_tags frame=%d state_only=%d dlist_size=%d\n", frame, state_only, m_display_list.size()));
+
+		if (step_diag() && get_id() == 750)
+		{
+			extern int g_efl_reason;
+			static int s_prev_frame = -1;
+			fprintf(stderr, "[LVL2] frame=%d state_only=%d play=%d total=%d reason=%d prev=%d\n",
+				frame, state_only ? 1 : 0, (int) m_play_state, get_frame_count(),
+				g_efl_reason, s_prev_frame);
+			s_prev_frame = frame;
+			fflush(stderr);
+		}
 		// Keep this (particularly m_as_environment) alive during execution!
 		gc_ptr<as_object>	this_ptr(this);
 
@@ -723,6 +827,16 @@ namespace gameswf
 		if (m_script)
 		{
 			m_script->get(frame, &m_frame_script);
+			// Temporary diagnostic: report the frame-script lookup for the
+			// bath/wash clip so the missing frame scripts can be traced.
+			if (m_script->size() > 4)
+			{
+				fprintf(stderr, "[FS] clip=%p id=%d name='%s' frame=%d total=%d cur=%d play=%d found=%p\n",
+					(void*) this, get_id(), get_name().c_str(), frame,
+					m_def != NULL ? m_def->get_frame_count() : -1,
+					m_current_frame, (int) m_play_state, m_frame_script.get_ptr());
+				fflush(stderr);
+			}
 			if (m_frame_script != NULL)
 			{
 				SPRITE_TRACE_FPRINTF( "[FRAMESCRIPT] set_frame_script: frame=%d this=%p id=%d name='%s' cur=%d total=%d play=%d found=%p parent=%p\n",
@@ -764,10 +878,20 @@ namespace gameswf
 	// 0-based frame numbers!!  (in contrast to ActionScript and Flash MX)
 	void sprite_instance::goto_frame(int target_frame_number)
 	{
-		SPRITE_TRACE_FPRINTF( "[GOTO] this=%p id=%d name='%s' target=%d cur=%d total=%d\n",
-			this, get_id(), get_name().c_str(), target_frame_number, m_current_frame,
+		// Temporary diagnostic: who resets the bath/wash clip to frame 0?
+		if (get_id() == 750 || get_id() == 724)
+		{
+			fprintf(stderr, "[GOTO%d] target=%d cur=%d total=%d\n",
+				get_id(), target_frame_number, m_current_frame,
+				m_def != NULL ? m_def->get_frame_count() : -1);
+			fflush(stderr);
+		}
+	{
+		extern int g_render_frames;
+		SPRITE_TRACE_FPRINTF( "[GOTO] rf=%d this=%p id=%d name='%s' target=%d cur=%d total=%d\n",
+			g_render_frames, this, get_id(), get_name().c_str(), target_frame_number, m_current_frame,
 			m_def != NULL ? m_def->get_frame_count() : -1);
-
+	}
 		//default property is to stop on goto frame
 		m_play_state = STOP;
 
@@ -788,14 +912,37 @@ namespace gameswf
 		{
 			for (int f = m_current_frame + 1; f < target_frame_number; ++f)
 			{
+				g_efl_reason = 3;
 				execute_frame_tags(f, true);
 			}
 		}
 
 		m_action_list.clear();
+		g_efl_reason = 2;
+		// Flash updates currentFrame to the target *before* running that
+		// frame's DoAction, so a script on frame N sees this.currentFrame == N.
+		// Running the tags first left m_current_frame on the frame we came
+		// from, and scripts that branch on currentFrame (e.g. the bath level's
+		// "is the wash bar full yet?" check) then took the stale branch.
+		m_current_frame = target_frame_number;
 		execute_frame_tags(target_frame_number, false);
 
-		m_current_frame = target_frame_number;
+		// Flash runs a frame script SYNCHRONOUSLY, before gotoAndStop/gotoAndPlay
+		// returns to the caller.  Deferring it to the next advance() breaks the
+		// wash level: two gotoAndStop() strokes in a row (one per qualifying
+		// mouse move) left the frame-144 completion script pending, and the
+		// second stroke's set_frame_script(145) overwrote m_frame_script with
+		// NULL, so the "wash finished -> setTimeout(play)" chain never started
+		// and the level froze on frame 145 forever.
+		if (m_frame_script != NULL)
+		{
+			// Guard against re-entrancy: a frame script may itself goto another
+			// frame, which would recurse into here.
+			gc_ptr<as_function>	script = m_frame_script;
+			m_frame_script = NULL;
+			gc_ptr<as_object>	this_ptr(this);
+			gameswf::call_method(script.get_ptr(), &m_as_environment, as_value(), 0, 0);
+		}
 
 		// actions from gotoFrame() will be executed in advance()
 		// Macromedia Flash does goto_frame then run actions from this frame.
@@ -892,25 +1039,21 @@ namespace gameswf
 			return NULL;
 		}
 
-		// If we already have this object on this
-		// plane, then move it instead of replacing it.
+		// If we already have an object on this depth, check whether this is a
+		// *Move* of the very same instance (identical character_id and name).
+		// The display list is keyed by depth: a (re)placement at an occupied
+		// depth with a *different* character_id is a legitimate SWF swap of the
+		// sprite definition at that depth (e.g. step MC swapping its "gensui"
+		// head between sub-steps) -- we must create the new instance and let
+		// the display list replace the old one below, NOT keep the old object.
 		character*	existing_char = m_display_list.get_character_at_depth(depth);
-		if (existing_char)
+		if (existing_char
+			&& character_id == existing_char->get_id()
+			&& name == existing_char->get_name())
 		{
-			if (character_id == existing_char->get_id() && name == existing_char->get_name())
-			{
-				// Same character_id and name: just move it
-				move_display_object(depth, true, color_transform, true, matrix, ratio, clip_depth, blend_mode);
-				return NULL;
-			}
-			else if (name == existing_char->get_name() && name.size() > 0)
-			{
-				// Same name but different character_id: 
-				// Don't replace the existing character to preserve its state
-				// (e.g., gotoAndStop frame). Just move it instead.
-				move_display_object(depth, true, color_transform, true, matrix, ratio, clip_depth, blend_mode);
-				return NULL;
-			}
+			// Same instance: just move it (don't recreate).
+			move_display_object(depth, true, color_transform, true, matrix, ratio, clip_depth, blend_mode);
+			return NULL;
 		}
 		
 		// Check if there's an existing character with the same name at a different depth.
@@ -925,6 +1068,15 @@ namespace gameswf
 		gc_ptr<character>	ch = cdef->create_character_instance(this, character_id);
 		assert(ch != NULL);
 		ch->set_name(name);
+
+		if (character_id == 695 || character_id == 697)
+		{
+			float _ax = matrix.m_[0][2], _ay = matrix.m_[1][2];
+			fprintf(stderr, "[ARROW] place cid=%d into parent_id=%d name='%s' depth=%d instname='%s' vis=%d at (%.0f,%.0f)\n",
+				character_id, get_id(), get_name().c_str(), depth, name.c_str(),
+				ch->get_visible() ? 1 : 0, _ax, _ay);
+			fflush(stderr);
+		}
 
 		// If there was a character with the same name at a different depth,
 		// preserve its frame state (e.g., gotoAndStop frame).
@@ -1567,6 +1719,7 @@ namespace gameswf
 				// is running as the event bubbles.
 				event_obj->set_member("currentTarget", as_value(level));
 
+
 				as_array* listeners_array = NULL;
 				if (handlers.is_object())
 				{
@@ -1613,9 +1766,11 @@ namespace gameswf
 						if (strcmp(event_type, "enterFrame") != 0)
 						{
 							character* ch = cast_to<character>(level);
-							SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=%d\n",
+							SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=%d fn=%p\n",
 								(void*) level, ch != NULL ? ch->get_name().c_str() : "?",
-								event_type, (int) snapshot.size());
+								event_type, (int) snapshot.size(),
+								(void*) (snapshot.size() > 0 && avm2_listener_function_value(snapshot[0]).is_function()
+									? avm2_listener_function_value(snapshot[0]).to_function() : NULL));
 						}
 					}
 				}
@@ -1629,8 +1784,9 @@ namespace gameswf
 					if (strcmp(event_type, "enterFrame") != 0)
 					{
 						character* ch = cast_to<character>(level);
-						SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=1\n",
-							(void*) level, ch != NULL ? ch->get_name().c_str() : "?", event_type);
+						SPRITE_TRACE_FPRINTF( "[AVM2EVT] obj=%p name='%s' type='%s' listeners=1 fn=%p\n",
+							(void*) level, ch != NULL ? ch->get_name().c_str() : "?", event_type,
+							(void*) (handlers.is_function() ? handlers.to_function() : NULL));
 					}
 				}
 			}

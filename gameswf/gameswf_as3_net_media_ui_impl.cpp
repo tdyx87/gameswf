@@ -421,10 +421,24 @@ static void sound_load(const fn_call& fn)
 	fn.this_ptr->set_member("__loaded__", as_value(true));
 }
 
+static void soundchannel_stop(const fn_call& fn);
+
 static void sound_play(const fn_call& fn)
 {
-	// Simplified - return null sound channel
-	fn.result->set_null();
+	// Callers decide the sound-on UI state from play()'s return value
+	// (a null result means "silenced"; e.g. the BgMusic class would show
+	// the muted icon).  Always hand back a live SoundChannel even when
+	// no audio data was actually loaded.
+	// GAMESWF_NULLCHANNEL=1 restores the old null return (debug aid).
+	const char* nz = getenv("GAMESWF_NULLCHANNEL");
+	if (nz != NULL && nz[0] == '1')
+	{
+		fn.result->set_null();
+		return;
+	}
+	gc_ptr<as_object> ch = new as_object(fn.get_player());
+	ch->builtin_member("stop", as_value(soundchannel_stop));
+	fn.result->set_as_object(ch.get_ptr());
 }
 
 static void sound_close(const fn_call& fn)

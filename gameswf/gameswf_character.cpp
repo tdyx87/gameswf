@@ -333,6 +333,12 @@ namespace gameswf
 	{
 		// first try character members
 		as_standard_member	std_member = get_standard_member(name);
+		if (get_name() == "loading" && std_member != M_INVALID_MEMBER)
+		{
+			fprintf(stderr, "[LOADBAR] std=%d val=%s\n", (int) std_member,
+				val.to_tu_string().c_str());
+			fflush(stderr);
+		}
 		switch (std_member)
 		{
 			default:
@@ -423,6 +429,15 @@ namespace gameswf
 			}
 			case M_VISIBLE:
 			{
+				{
+					const tu_string& nn = get_name();
+					if (nn == "tip" || nn == "tip2" || nn == "ren" || nn == "hit")
+					{
+						fprintf(stderr, "[ARROW] visible<-%d on '%s' (%p)\n",
+							val.to_bool() ? 1 : 0, nn.c_str(), this);
+						fflush(stderr);
+					}
+				}
 				set_visible(val.to_bool());
 				return true;
 			}

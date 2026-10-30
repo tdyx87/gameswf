@@ -647,13 +647,15 @@ struct render_handler_ogl : public gameswf::render_handler
 	gameswf::cxform	m_current_cxform;
 
 	int m_mask_level;	// nested mask level
+	bool m_maskvis_active;	// [MASKVIS] diagnostic: mask drawn visibly
 
 
 	render_handler_ogl() :
 		m_enable_antialias(false),
 		m_display_width(0),
 		m_display_height(0),
-		m_mask_level(0)
+		m_mask_level(0),
+		m_maskvis_active(false)
 	{
 	}
 
@@ -1013,14 +1015,38 @@ struct render_handler_ogl : public gameswf::render_handler
 	// viewport_width, viewport_y0 + viewport_height) defines the
 	// window coordinates taken up by the movie.
 	//
-	// The rectangle (x0, y0, x1, y1) defines the pixel
-	// coordinates of the movie that correspond to the viewport
-	// bounds.
 	{
+		// [GLINFO] One-shot dump of the GL state that mask rendering
+		// depends on.  glStencilFunc's `ref` must be representable in
+		// the stencil buffer; with 0 stencil bits every SWF mask
+		// (progress bars, wipes) silently stops clipping and its
+		// layers render unclipped.  Gated by GAMESWF_GLINFO.
+		static int s_glinfo = -1;
+		if (s_glinfo < 0)
+		{
+			const char* g = getenv("GAMESWF_GLINFO");
+			s_glinfo = (g && g[0]) ? 1 : 0;
+		}
+		if (s_glinfo)
+		{
+			static int s_done = 0;
+			if (!s_done)
+			{
+				s_done = 1;
+				GLint sb = 0, db = 0;
+				glGetIntegerv(GL_STENCIL_BITS, &sb);
+				glGetIntegerv(GL_DEPTH_BITS, &db);
+				fprintf(stderr, "[GLINFO] STENCIL_BITS=%d DEPTH_BITS=%d mask_level=%d\n",
+					(int) sb, (int) db, m_mask_level);
+				fflush(stderr);
+			}
+		}
+
 		// Ensure color writes are enabled at the start of each frame.
-		// The mask rendering code disables color writes (glColorMask(0,0,0,0))
-		// during stencil mask operations. If a mask operation doesn't complete
-		// properly, color writing stays disabled and the screen appears black.
+		// The mask rendering code disables color writes
+		// (glColorMask(0,0,0,0)) during stencil mask operations; if a
+		// mask operation doesn't complete, color writing would stay off
+		// and the screen would go black.
 		glColorMask(1, 1, 1, 1);
 
 		// Clear the background each frame before drawing.
@@ -1201,9 +1227,32 @@ struct render_handler_ogl : public gameswf::render_handler
 		// Set up current style.
 		m_current_styles[LEFT_STYLE].apply();
 
+		// Drain anything the style setup raised so the checks below
+		// attribute an error to the right call.
+		for (int k = 0; k < 32 && glGetError() != GL_NO_ERROR; k++) { }
+
 		glMatrixMode(GL_MODELVIEW);
 		glPushMatrix();
 		apply_matrix(m_current_matrix);
+		{
+			static int s_merr = -1;
+			if (s_merr < 0)
+			{
+				const char* g = getenv("GAMESWF_MATERR");
+				s_merr = (g && g[0]) ? 1 : 0;
+			}
+			if (s_merr)
+			{
+				static int s_n = 0;
+				GLenum e = glGetError();
+				if (e != GL_NO_ERROR && s_n < 3)
+				{
+					s_n++;
+					fprintf(stderr, "[MATERR] err=0x%04X after apply_matrix mask_level=%d\n", e, m_mask_level);
+					fflush(stderr);
+				}
+			}
+		}
 
 		// Send the tris to OpenGL
 		glEnableClientState(GL_VERTEX_ARRAY);
@@ -1215,6 +1264,42 @@ struct render_handler_ogl : public gameswf::render_handler
 		#endif
 
 		glDrawArrays(primitive_type, 0, vertex_count);
+
+		{
+			// [DRAWERR] Report GL errors raised by this draw, and the
+			// vertex count actually submitted.  A mask's stencil is written
+			// by exactly these polygons, so an error here (or a degenerate
+			// vertex_count) means the mask never lands in the stencil and
+			// every layer it should clip stays visible.  Gated by
+			// GAMESWF_DRAWERR.
+			static int s_drawerr = -1;
+			if (s_drawerr < 0)
+			{
+				const char* g = getenv("GAMESWF_DRAWERR");
+				s_drawerr = (g && g[0]) ? 1 : 0;
+			}
+			if (s_drawerr)
+			{
+				static int s_n = 0;
+				GLenum e = glGetError();
+				if ((e != GL_NO_ERROR || vertex_count < 3) && s_n < 6)
+				{
+					s_n++;
+					const short* v = (const short*) coords;
+					float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+					if (vertex_count > 0)
+					{
+						x0 = v[0]; y0 = v[1];
+						x1 = v[(vertex_count - 1) * 2];
+						y1 = v[(vertex_count - 1) * 2 + 1];
+					}
+					fprintf(stderr, "[DRAWERR] prim=%d verts=%d err=0x%04X mask_level=%d "
+						"first=(%g,%g) last=(%g,%g)\n",
+						(int) primitive_type, vertex_count, e, m_mask_level, x0, y0, x1, y1);
+					fflush(stderr);
+				}
+			}
+		}
 
 		if (m_current_styles[LEFT_STYLE].needs_second_pass())
 		{
@@ -1230,6 +1315,27 @@ struct render_handler_ogl : public gameswf::render_handler
 			glHint(GL_POLYGON_SMOOTH_HINT, GL_NICEST);	// GL_NICEST, GL_FASTEST, GL_DONT_CARE
 			glDrawArrays(primitive_type, 0, vertex_count);
 			glDisable(GL_POLYGON_SMOOTH);
+		}
+
+		{
+			static int s_aerr = -1;
+			if (s_aerr < 0)
+			{
+				const char* g = getenv("GAMESWF_AERR");
+				s_aerr = (g && g[0]) ? 1 : 0;
+			}
+			if (s_aerr)
+			{
+				static int s_n = 0;
+				GLenum e = glGetError();
+				if (e != GL_NO_ERROR && s_n < 5)
+				{
+					s_n++;
+					fprintf(stderr, "[AERR] after-aa prim=%d verts=%d err=0x%04X aa=%d mask_level=%d\n",
+						(int) primitive_type, vertex_count, e, (int) m_enable_antialias, m_mask_level);
+					fflush(stderr);
+				}
+			}
 		}
 
 		glDisableClientState(GL_VERTEX_ARRAY);
@@ -1479,6 +1585,36 @@ struct render_handler_ogl : public gameswf::render_handler
 
 	void begin_submit_mask()
 	{
+		// [MASKTRACE] Narrow down which GL call raises the 0x0501 that
+		// otherwise surfaces (mislabelled) in end_submit_mask().  We drain
+		// any pre-existing error, then re-check right after the mask
+		// object has been drawn by the caller.  Gated by GAMESWF_MASKTRACE.
+		static int s_mt = -1;
+		if (s_mt < 0)
+		{
+			const char* g = getenv("GAMESWF_MASKTRACE");
+			s_mt = (g && g[0]) ? 1 : 0;
+		}
+		for (int k = 0; k < 32 && glGetError() != GL_NO_ERROR; k++) { }
+
+		// [MASKVIS] When set, render the mask geometry visibly (no stencil)
+		// so we can see where the mask actually lands on screen.  The mask
+		// shape here is opaque black, so it shows up as a black region if
+		// its geometry and transform are correct.  Diagnostic only.
+		static int s_maskvis = -1;
+		if (s_maskvis < 0)
+		{
+			const char* g = getenv("GAMESWF_MASKVIS");
+			s_maskvis = (g && g[0]) ? 1 : 0;
+		}
+		if (s_maskvis)
+		{
+			m_maskvis_active = true;
+			glColorMask(1, 1, 1, 1);
+			return;
+		}
+		m_maskvis_active = false;
+
 		if (m_mask_level == 0)
 		{
 			assert(glIsEnabled(GL_STENCIL_TEST) == false);
@@ -1497,24 +1633,105 @@ struct render_handler_ogl : public gameswf::render_handler
 		GLenum e = glGetError();
 		static int s_begin_mask_errs = 0;
 		if (e != GL_NO_ERROR && ++s_begin_mask_errs <= 3) gameswf::log_error("ogl: begin_submit_mask GL error 0x%04X (level=%d)\n", e, m_mask_level-1);
+		{
+			// [MASKLVL] Watch the nesting depth.  glStencilFunc's ref
+			// must stay within the stencil buffer's range (0..2^n-1);
+			// once m_mask_level exceeds it the driver rejects the call
+			// with GL_INVALID_VALUE and keeps the *previous* func, so the
+			// mask stops clipping.  An unbalanced begin/end/disable shows
+			// up here as a level that only ever grows.
+			static int s_lvl = -1;
+			if (s_lvl < 0)
+			{
+				const char* g = getenv("GAMESWF_MASKLVL");
+				s_lvl = (g && g[0]) ? 1 : 0;
+			}
+			if (s_lvl && (m_mask_level < 0 || m_mask_level > 200 || (m_mask_level % 64) == 0))
+			{
+				fprintf(stderr, "[MASKLVL] level=%d\n", m_mask_level);
+				fflush(stderr);
+			}
+		}
 	}
 
 	// called after begin_submit_mask and the drawing of mask polygons
-	void end_submit_mask()
-	{	     
+void end_submit_mask()
+	{
+		if (m_maskvis_active)
+		{
+			return;
+		}
+
 		// enable framebuffer writes
 		glColorMask(1, 1, 1, 1);
 
+		// [MASKTRACE] Verify the mask actually reached the stencil: sample
+		// a pixel inside the mask's bounding box and report its stencil
+		// value.  A mask that drew nothing leaves 0 everywhere, which is
+		// why the layers it should clip stay visible.
+		static int s_mt2 = -1;
+		if (s_mt2 < 0)
+		{
+			const char* g = getenv("GAMESWF_MASKTRACE");
+			s_mt2 = (g && g[0]) ? 1 : 0;
+		}
+		if (s_mt2)
+		{
+			static int s_n = 0;
+			GLenum e0 = glGetError();
+			extern int g_render_frames;
+			if (g_render_frames > 2300 && s_n < 4000)
+			{
+				s_n++;
+				GLint bits = 0;
+				glGetIntegerv(GL_STENCIL_BITS, &bits);
+				GLint vp[4] = {0,0,0,0};
+				glGetIntegerv(GL_VIEWPORT, vp);
+				int w = vp[2], h = vp[3];
+				if (w > 0 && h > 0 && w <= 2048 && h <= 2048)
+				{
+					GLubyte* sb = new GLubyte[(size_t) w * h];
+					glReadPixels(0, 0, w, h, GL_STENCIL_INDEX, GL_UNSIGNED_BYTE, sb);
+					int nx0 = w, ny0 = h, nx1 = -1, ny1 = -1, cnt = 0, maxv = 0;
+					for (int y = 0; y < h; y++)
+					{
+						const GLubyte* row = sb + (size_t) y * w;
+						for (int x = 0; x < w; x++)
+						{
+							if (row[x])
+							{
+								cnt++;
+								if (x < nx0) nx0 = x;
+								if (x > nx1) nx1 = x;
+								if (y < ny0) ny0 = y;
+								if (y > ny1) ny1 = y;
+								if (row[x] > maxv) maxv = row[x];
+							}
+						}
+					}
+					delete[] sb;
+					if (cnt > 0)
+					{
+						fprintf(stderr, "[MASKBB] rf=%d n=%d bits=%d cnt=%d bbox=(%d,%d)-(%d,%d) max=%d level=%d\n",
+							g_render_frames, s_n, bits, cnt, nx0, ny0, nx1, ny1, maxv, m_mask_level);
+						fflush(stderr);
+					}
+				}
+			}
+		}
+
 		// we draw only where the stencil is m_mask_level (where the current mask was drawn)
 		glStencilFunc(GL_EQUAL, m_mask_level, 0xFF);
-		glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);	
-		GLenum e = glGetError();
-		static int s_end_mask_errs = 0;
-		if (e != GL_NO_ERROR && ++s_end_mask_errs <= 3) gameswf::log_error("ogl: end_submit_mask GL error 0x%04X\n", e);
+		glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
 	}
 
 	void disable_mask()
 	{	     
+		if (m_maskvis_active)
+		{
+			m_maskvis_active = false;
+			return;
+		}
 		assert(m_mask_level > 0);
 		if (--m_mask_level == 0)
 		{

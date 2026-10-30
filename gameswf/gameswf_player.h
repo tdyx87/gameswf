@@ -45,6 +45,27 @@ namespace gameswf
 		// it's used to watch texture memory
 		bool m_log_bitmap_info;
 
+		// setInterval / setTimeout timers.  A timer has to outlive the frame
+		// that created it, but it cannot keep itself alive with a gc_ptr to
+		// itself: the collector is mark/sweep, so a self-reference is an
+		// unreachable cycle and is swept within a few frames (which silently
+		// killed the bath level's wash-completion timer).  Holding the strong
+		// reference here -- in player, which the collector does not own --
+		// makes these real roots.
+		array<gc_ptr<as_object> > m_timers;
+		void add_timer(as_object* timer) { m_timers.push_back(timer); }
+		void remove_timer(as_object* timer);
+
+		// ENTER_FRAME listeners that live on plain as_objects (AS3 `new
+		// Sprite()` produces an as_object, not a character, so nothing in the
+		// display tree advances it).  TweenLite installs its whole ticker as
+		// `timingSprite.addEventListener(Event.ENTER_FRAME, updateAll)`, and
+		// with no driver every tween in a game freezes, so root::advance()
+		// dispatches enterFrame to these objects itself.
+		array<gc_ptr<as_object> > m_frame_listeners;
+		void add_frame_listener(as_object* obj);
+		void remove_frame_listener(as_object* obj);
+
 		// Players count to release all static stuff at the right time
 		static int s_player_count;
 

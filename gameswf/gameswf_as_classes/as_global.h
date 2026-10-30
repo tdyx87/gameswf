@@ -23,19 +23,23 @@ namespace gameswf
 	// for setInterval and setTimeout
 	struct as_timer : public as_object
 	{
-		weak_ptr<as_object> m_this_ptr;
-		weak_ptr<as_function> m_func;
+		// Strong references on purpose.  Flash keeps both the callback closure
+		// and its receiver alive until the interval is cleared; with weak
+		// pointers the collector could reclaim a closure that the SWF only
+		// referenced through this timer, and the timer would then keep firing
+		// while the call did nothing at all (silently stalling whatever the
+		// game was waiting for).
+		gc_ptr<as_object> m_this_ptr;
+		gc_ptr<as_function> m_func;
 		float m_interval;	// sec
 		float m_time_remainder;
 		array<as_value> m_arg;
 		bool m_do_once;
 
-		// The GC is refcount-based and listener::m_listeners holds only
-		// weak_ptrs.  A timer registered from callpropvoid (return value
-		// discarded) therefore died before its first tick; m_keepalive is
-		// a self-reference released when the timer is consumed (do_once
-		// fire) or cleared, so it stays alive exactly while registered.
-		gc_ptr<as_object> m_keepalive;
+		// Note: a timer must not hold a gc_ptr to itself to stay alive.  The
+		// collector is mark/sweep, so a self-reference is an unreachable
+		// cycle and is swept; the strong reference lives in
+		// player::m_timers instead (see player::add_timer).
 
 		// Unique id of a gameswf resource
 		enum { m_class_id = AS_TIMER };

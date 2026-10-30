@@ -941,16 +941,16 @@ namespace gameswf
 					if (i < (int) fills.size()) {
 						l.m_meshes[i]->display(fills[i], 1.0f, bm);
 					}
-					else {
-						render::fill_style_disable(0);
-						static int s_oob_fill = 0;
-						if (s_oob_fill < 20)
-						{
-							s_oob_fill++;
-							log_error("fill style index %d out of range (%d styles)\n",
-								i, (int) fills.size());
-						}
+				else {
+					render::fill_style_disable(0);
+					static int s_oob_fill = 0;
+					if (s_oob_fill < 20)
+					{
+						s_oob_fill++;
+						log_error("fill style index %d out of range (%d styles)\n",
+							i, (int) fills.size());
 					}
+				}
 				}
 			}
 
@@ -1656,6 +1656,31 @@ namespace gameswf
 	// override our default set of fill styles (e.g. when
 	// rendering text).
 	{
+		// [SHAPEDEF] Identify shapes that arrive here with no fill styles
+		// (their meshes are then skipped and they draw nothing -- critical
+		// when the shape is used as a mask, which then clips everything).
+		// Gated by GAMESWF_SHAPEDEF.
+		static int s_shapedef = -1;
+		if (s_shapedef < 0)
+		{
+			const char* g = getenv("GAMESWF_SHAPEDEF");
+			s_shapedef = (g && g[0]) ? 1 : 0;
+		}
+		if (s_shapedef && fill_styles.size() == 0)
+		{
+			static int s_sd_n = 0;
+			if (s_sd_n < 30)
+			{
+				s_sd_n++;
+				const rect& b = get_bound_local();
+				log_error("[SHAPEDEF] 0 fills, %d lines, bound=(%g,%g)-(%g,%g) scale=%g\n",
+					(int) line_styles.size(),
+					(float) b.m_x_min, (float) b.m_y_min,
+					(float) b.m_x_max, (float) b.m_y_max,
+					mat.get_max_scale());
+			}
+		}
+
 		// Compute the error tolerance in object-space.
 		float	max_scale = mat.get_max_scale();
 		if (fabsf(max_scale) < 1e-6f)

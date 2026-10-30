@@ -123,6 +123,13 @@ namespace gameswf
 	{
 		assert(ch);
 
+		if (ch->get_id() == 750 || ch->get_id() == 695)
+		{
+			fprintf(stderr, "[ARROW] instanciate_registered_class id=%d name='%s'\n",
+				ch->get_id(), ch->get_name().c_str());
+			fflush(stderr);
+		}
+
 		// flash9
 		// try SymbolClass tag
 		//

@@ -18,6 +18,8 @@
 #include "gameswf/gameswf.h"
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
+#include <vector>
 #include "base/utility.h"
 #include "base/container.h"
 #include "base/tu_file.h"
@@ -28,6 +30,10 @@
 #include "gameswf/gameswf_root.h"
 #include "gameswf/gameswf_freetype.h"
 #include "gameswf/gameswf_player.h"
+#include "gameswf/gameswf_sprite.h"
+#include "gameswf/gameswf_movie_def.h"
+#include "gameswf/gameswf.h"
+#include "base/container.h"
 
 #if TU_ENABLE_NETWORK == 1
 #	include "net/tu_net_file.h"
@@ -35,6 +41,8 @@
 
 #ifdef _WIN32
 #	include <Winsock.h>
+#	include <windows.h>
+#	include <mmsystem.h>
 #	define stricmp _stricmp
 #else
 #	define stricmp strcasecmp
@@ -359,6 +367,186 @@ static void aim_store(const char* name, int x, int y)
 	}
 }
 
+// When GAMESWF_IGNORE_REAL_MOUSE=1 the harness drops OS mouse motion and
+// button events, so a test driven purely by -clkms/-clickname/-dragto is
+// reproducible even if a real pointer is moving over the window.
+static bool ignore_real_mouse_input()
+{
+	static int s_ignore = -1;
+	if (s_ignore < 0)
+	{
+		const char* e = getenv("GAMESWF_IGNORE_REAL_MOUSE");
+		s_ignore = (e != NULL && e[0] == '1') ? 1 : 0;
+	}
+	return s_ignore == 1;
+}
+
+// Optional stderr tracing of raw SDL mouse events, for harness debugging.
+static bool log_sdl_mouse_events()
+{
+	static int s_log = -1;
+	if (s_log < 0)
+	{
+		const char* e = getenv("GAMESWF_TRACE_SDL_MOUSE");
+		s_log = (e != NULL && e[0] == '1') ? 1 : 0;
+	}
+	return s_log == 1;
+}
+
+// -gestures <file>: a scripted, fully-automated gesture sequence.
+//
+// The -clk*/-drag* tasks all run concurrently every loop and share one
+// pointer state, so the later task in the frame clobbers the earlier one
+// and tricky interactions (press, hold, travel, release over a moving
+// target) cannot be expressed.  A gesture script instead runs strictly in
+// order, one entry at a time, and fixes the pointer for as many frames as
+// each entry needs.  That is enough to replay an entire drag-driven level
+// without a real mouse (combine with GAMESWF_IGNORE_REAL_MOUSE=1).
+//
+// One command per line; '#' starts a comment; blank lines are ignored:
+//
+//   waitms   <ms>                 wait until <ms> since start
+//   waitframe <n>                 wait until the frame of the -framechar clip
+//                                  (default stepMC) reaches n
+//   waitname  <name>              wait until a clip named <name> exists
+//   waithit   <x> <y> <name>      wait until the topmost clip at x,y is <name>
+//   moveto    <x> <y>             move the pointer (1 frame, button unchanged)
+//   press                         hold the left button (1 frame, current pos)
+//   release                       release the left button (1 frame)
+//   click     <x> <y> [hover]     hover, press, release at x,y
+//   clickname <name> [hover]      like click, but aim at where a press would
+//                                 really land on the clip named <name>
+//   drag      <x1> <y1> <x2> <y2> [dur]
+//                                 hover on the grab point, press, travel in a
+//                                 straight line over dur frames, release
+//   dragpath  <dur> <x1> <y1> <x2> <y2> ...
+//                                 press on the first point, travel through the
+//                                 remaining waypoints over dur frames, release
+//   movepath  <dur> <x1> <y1> <x2> <y2> ...
+//                                 like dragpath but with the button up (for
+//                                 steps that only watch mouse movement)
+//   home                          move the pointer to 0,0 and drop the button
+//   quit                          stop the player once earlier entries finish
+//
+// Every press is preceded by a short hover so root::generate_mouse_button_events
+// has a roll-over frame to record the active entity on, exactly like a person
+// moving the pointer onto the target before clicking.
+enum gesture_kind_t
+{
+	GK_MOVETO, GK_PRESS, GK_RELEASE, GK_CLICK, GK_CLICKNAME, GK_DRAG, GK_DRAGPATH, GK_MOVEPATH,
+	GK_WASH, GK_WAITMS, GK_WAITFRAME, GK_WAITNAME, GK_WAITHIT, GK_DUMP, GK_QUIT,
+	GK_DRAGNAME, GK_LISTPRESS
+};
+
+struct scheduled_gesture_t
+{
+	int		kind;
+	int		x, y;			// point (moveto/click; hit point for waithit)
+	int		x1, y1, x2, y2;		// drag endpoints
+	int		dur;			// frames for click hover / drag travel
+	int		wait_ms;		// absolute ms for waitms
+	int		wait_frame;		// target frame for waitframe
+	tu_string	name;			// waitname / waithit target
+	std::vector<int>	path;		// dragpath flat [x0,y0,x1,y1,...]
+	// runtime
+	int		step;			// frames elapsed inside this entry
+};
+
+static bool	gesture_load(const char* path, std::vector<scheduled_gesture_t>& out)
+{
+	FILE* f = fopen(path, "rb");
+	if (f == NULL)
+	{
+		fprintf(stderr, "-gestures: cannot open '%s'\n", path);
+		return false;
+	}
+
+	char	line[2048];
+	int	lineno = 0;
+	while (fgets(line, sizeof(line), f) != NULL)
+	{
+		lineno++;
+		char* hash = strchr(line, '#');
+		if (hash) { *hash = 0; }
+
+		char*	tok[40];
+		int	nt = 0;
+		char* p = strtok(line, " \t\r\n");
+		while (p != NULL && nt < 40) { tok[nt++] = p; p = strtok(NULL, " \t\r\n"); }
+		if (nt == 0) { continue; }
+
+		scheduled_gesture_t	g;
+		g.kind = -1; g.x = g.y = g.x1 = g.y1 = g.x2 = g.y2 = 0;
+		g.dur = 0; g.wait_ms = 0; g.wait_frame = 0; g.name = ""; g.step = 0;
+
+		const char* c0 = tok[0];
+		if (strcmp(c0, "waitms") == 0 && nt >= 2)		{ g.kind = GK_WAITMS; g.wait_ms = atoi(tok[1]); }
+		else if (strcmp(c0, "waitframe") == 0 && nt >= 2)	{ g.kind = GK_WAITFRAME; g.wait_frame = atoi(tok[1]); }
+		else if (strcmp(c0, "waitname") == 0 && nt >= 2)	{ g.kind = GK_WAITNAME; g.name = tok[1]; }
+		else if (strcmp(c0, "waithit") == 0 && nt >= 4)		{ g.kind = GK_WAITHIT; g.x = atoi(tok[1]); g.y = atoi(tok[2]); g.name = tok[3]; }
+		else if (strcmp(c0, "moveto") == 0 && nt >= 3)		{ g.kind = GK_MOVETO; g.x = atoi(tok[1]); g.y = atoi(tok[2]); }
+		else if (strcmp(c0, "press") == 0)			{ g.kind = GK_PRESS; }
+		else if (strcmp(c0, "release") == 0)			{ g.kind = GK_RELEASE; }
+		else if (strcmp(c0, "click") == 0 && nt >= 3)		{ g.kind = GK_CLICK; g.x = atoi(tok[1]); g.y = atoi(tok[2]); if (nt >= 4) { g.dur = atoi(tok[3]); } }
+		else if (strcmp(c0, "clickname") == 0 && nt >= 2)	{ g.kind = GK_CLICKNAME; g.name = tok[1]; if (nt >= 3) { g.dur = atoi(tok[2]); } }
+		else if (strcmp(c0, "drag") == 0 && nt >= 5)
+		{
+			g.kind = GK_DRAG;
+			g.x1 = atoi(tok[1]); g.y1 = atoi(tok[2]); g.x2 = atoi(tok[3]); g.y2 = atoi(tok[4]);
+			if (nt >= 6) { g.dur = atoi(tok[5]); }
+		}
+		else if (strcmp(c0, "dragpath") == 0 && nt >= 5)
+		{
+			g.kind = GK_DRAGPATH; g.dur = atoi(tok[1]);
+			for (int i = 2; i < nt; i++) { g.path.push_back(atoi(tok[i])); }
+		}
+		else if (strcmp(c0, "movepath") == 0 && nt >= 5)
+		{
+			g.kind = GK_MOVEPATH; g.dur = atoi(tok[1]);
+			for (int i = 2; i < nt; i++) { g.path.push_back(atoi(tok[i])); }
+		}
+		else if (strcmp(c0, "wash") == 0 && nt >= 4)
+		{
+			// wash <cx> <cy> <radius> [frames]: rub a small circle around
+			// (cx,cy), button up.  Dense, single-target pointer motion, so
+			// "rub the soap/rinse" steps accumulate their per-mouseMove
+			// progress instead of resetting.
+			g.kind = GK_WASH;
+			g.x = atoi(tok[1]); g.y = atoi(tok[2]); g.x1 = atoi(tok[3]);
+			if (nt >= 5) { g.dur = atoi(tok[4]); }
+		}
+		else if (strcmp(c0, "dragname") == 0 && nt >= 4)
+		{
+			// dragname <name> <x> <y> [dur]
+			// Grab the clip called <name> at a point the engine's own hit
+			// test agrees belongs to it, then drag it to (x,y) and release.
+			// Resolving the grab point this way is much more reliable than
+			// hard-coded coordinates: the clips in these levels are scaled
+			// and stacked, so a hand-picked pixel often lands on a
+			// neighbour and the drag never starts.
+			g.kind = GK_DRAGNAME;
+			g.name = tok[1];
+			g.x2 = atoi(tok[2]); g.y2 = atoi(tok[3]);
+			if (nt >= 5) { g.dur = atoi(tok[4]); }
+		}
+		else if (strcmp(c0, "listpress") == 0)		{ g.kind = GK_LISTPRESS; }
+		else if (strcmp(c0, "dumptree") == 0)			{ g.kind = GK_DUMP; }
+		else if (strcmp(c0, "home") == 0)			{ g.kind = GK_MOVETO; g.x = 0; g.y = 0; }
+		else if (strcmp(c0, "quit") == 0)			{ g.kind = GK_QUIT; }
+		else
+		{
+			fprintf(stderr, "-gestures: %s:%d: unknown command '%s'\n", path, lineno, c0);
+			continue;
+		}
+
+		out.push_back(g);
+	}
+	fclose(f);
+	return true;
+}
+
+
+int g_render_frames = 0;
 
 int	main(int argc, char *argv[])
 {
@@ -396,6 +584,10 @@ int	dump_tree_ms = -1;
 	struct scheduled_drag_t { int frame, x1, y1, x2, y2, dur; int time_ms; int press_frame; bool fired; tu_string want_name; };
 	scheduled_drag_t	auto_drags[12];
 	int	auto_drag_count = 0;
+	// -gestures: strictly-ordered scripted gestures (see gesture_load above).
+	std::vector<scheduled_gesture_t>	gestures;
+	bool	gestures_on = false;
+	tu_string	frame_char = "stepMC";	// clip watched by 'waitframe'
 		float	tex_lod_bias;
 		bool	force_realtime_framerate = false;
 
@@ -707,6 +899,41 @@ int	dump_tree_ms = -1;
 				continue;
 			}
 
+			if (strcmp(argv[arg], "-gestures") == 0)
+			{
+				// Scripted, fully-automated gesture sequence; see gesture_load.
+				// Usage: -gestures <file>
+				if (arg + 1 >= argc)
+				{
+					fprintf(stderr, "-gestures needs arg: <file>\n");
+					exit(1);
+				}
+				if (!gesture_load(argv[arg + 1], gestures))
+				{
+					exit(1);
+				}
+				gestures_on = !gestures.empty();
+				fprintf(stderr, "-gestures: loaded %d entries from %s\n",
+					(int) gestures.size(), argv[arg + 1]);
+				fflush(stderr);
+				arg += 1;
+				continue;
+			}
+
+			if (strcmp(argv[arg], "-framechar") == 0)
+			{
+				// Clip whose timeline 'waitframe' watches.  Default stepMC.
+				// Usage: -framechar <name>
+				if (arg + 1 >= argc)
+				{
+					fprintf(stderr, "-framechar needs arg: <name>\n");
+					exit(1);
+				}
+				frame_char = argv[arg + 1];
+				arg += 1;
+				continue;
+			}
+
 			if (argv[arg][0] == '-')
 			{
 				// Looks like an option.
@@ -995,6 +1222,42 @@ int	dump_tree_ms = -1;
 				m->get_movie_width(), m->get_movie_height(),
 				m->get_movie_fps(), m->get_frame_count());
 
+			// --- Deterministic self-test for the gensui 730/733 resolution bug ---
+			// Build an isolated child sprite (acting like stepMC) and place two
+			// DIFFERENT character ids at the SAME depth with the SAME name
+			// ("gensui"), exactly like the SWF does at frames 146/148.  Then
+			// resolve this["gensui"] and assert it points at the LATEST cid.
+			if (getenv("GW_SELFTEST"))
+			{
+				gameswf::character* rm = m->get_root_movie();
+				gameswf::sprite_instance* test = new gameswf::sprite_instance(
+					player,
+					static_cast<gameswf::movie_definition_sub*>(m->get_movie_definition()),
+					m.get_ptr(), rm, 9999);
+				array<gameswf::swf_event*> eh;
+				gameswf::cxform cx;
+				gameswf::matrix mat;
+				test->add_display_object(716, "gensui", eh, 488, true, cx, mat, 0, 0, 0);
+				gameswf::as_value v1; test->get_member("gensui", &v1);
+				int after716 = -1;
+				if (v1.is_object())
+				{
+					gameswf::character* c1 = static_cast<gameswf::character*>(v1.to_object());
+					if (c1) after716 = c1->get_id();
+				}
+				test->add_display_object(733, "gensui", eh, 488, true, cx, mat, 0, 0, 0);
+				gameswf::as_value v2; test->get_member("gensui", &v2);
+				int after733 = -1;
+				if (v2.is_object())
+				{
+					gameswf::character* c2 = static_cast<gameswf::character*>(v2.to_object());
+					if (c2) after733 = c2->get_id();
+				}
+				fprintf(stderr, "[SELFTEST-RESOLVE] gensui after place 716 -> cid=%d ; after place 733 -> cid=%d (expect 733)\n",
+					after716, after733);
+				fprintf(stderr, "[SELFTEST-RESULT] %s\n", (after733 == 733) ? "PASS" : "FAIL");
+			}
+
 			if (width == 0 || height == 0)
 			{
 				width = m->get_movie_width();
@@ -1069,6 +1332,65 @@ int	dump_tree_ms = -1;
 					sound = gameswf::create_sound_handler_openal();
 #endif
 					gameswf::set_sound_handler(sound);
+				}
+
+				// Background music: the SWF itself carries no audio, so the
+				// music the site plays comes from an external file.  If a
+				// bgm.wav sits next to the movie (or is named via
+				// GAMESWF_BGM), loop it by default.  GAMESWF_BGM=0 or
+				// GAMESWF_NO_BGM=1 disables it.
+				if (do_sound)
+				{
+					const char* no_bgm = getenv("GAMESWF_NO_BGM");
+					const char* bgm_path = getenv("GAMESWF_BGM");
+					const char* candidates[3];
+					int ncand = 0;
+					static char override_bgm[600];
+					static char dir_bgm[600];
+					static char exe_bgm[600];
+					if (bgm_path && bgm_path[0] && strcmp(bgm_path, "0") != 0)
+					{
+						strcpy(override_bgm, bgm_path);
+						candidates[ncand++] = override_bgm;
+					}
+					if (infile != NULL && infile[0])
+					{
+						strcpy(dir_bgm, infile);
+						char* s1 = strrchr(dir_bgm, '/');
+						char* s2 = strrchr(dir_bgm, '\\');
+						char* last = (s1 > s2) ? s1 : s2;
+						if (last != NULL)
+							last[1] = '\0';
+						else
+							strcpy(dir_bgm, ".\\");
+						strcat(dir_bgm, "bgm.wav");
+						candidates[ncand++] = dir_bgm;
+					}
+					{
+						char exe_dir_buf[520];
+						DWORD exelen = GetModuleFileNameA(NULL, exe_dir_buf, sizeof(exe_dir_buf) - 10);
+						char* slash = (exelen > 0) ? strrchr(exe_dir_buf, '\\') : NULL;
+						if (slash != NULL)
+						{
+							slash[1] = '\0';
+							strcat(exe_dir_buf, "bgm.wav");
+							strcpy(exe_bgm, exe_dir_buf);
+							candidates[ncand++] = exe_bgm;
+						}
+					}
+					bool want_bgm = (no_bgm == NULL || no_bgm[0] != '1');
+					if (want_bgm)
+					{
+						for (int ci = 0; ci < ncand; ci++)
+						{
+							DWORD attr = GetFileAttributesA(candidates[ci]);
+							if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+							{
+								PlaySoundA(candidates[ci], NULL, SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+								break;
+							}
+						}
+					}
 				}
 
 				switch (s_bit_depth)
@@ -1167,7 +1489,7 @@ int	dump_tree_ms = -1;
 				// matching glPopAttrib was commented out, leaving the attrib stack
 				// permanently unbalanced. On some Windows OpenGL drivers (especially
 				// AMD/ATI), this silently corrupts the draw buffer state and disables
-				// rendering — producing a black screen despite valid GL calls.
+				// rendering �?producing a black screen despite valid GL calls.
 			}
 
 			// Mouse state.
@@ -1185,6 +1507,11 @@ int	dump_tree_ms = -1;
 			int	frame_counter = 0;
 			int	last_logged_fps = last_ticks;
 			int fps = 0;
+
+			// -gestures playback cursor: only the entry at gestures[g_index]
+			// acts, and it must finish before the next one starts.
+			int	g_index = 0;
+			bool	g_quit = false;
 
 			//TODO
 	//		gameswf::player* p = gameswf::create_player();
@@ -1212,6 +1539,8 @@ int	dump_tree_ms = -1;
 					&& ticks - start_ticks > (Uint32) (exit_timeout * 1000))
 				{
 					// Auto exit now.
+					fprintf(stderr, "[EXIT] timeout\n");
+					fflush(stderr);
 					break;
 				}
 
@@ -1234,6 +1563,8 @@ int	dump_tree_ms = -1;
 							// Handle SDL2 window events
 							if (event.window.event == SDL_WINDOWEVENT_CLOSE)
 							{
+								fprintf(stderr, "[EXIT] window close\n");
+								fflush(stderr);
 								goto done;
 							}
 							break;
@@ -1251,6 +1582,8 @@ int	dump_tree_ms = -1;
 									|| (ctrl && key == SDLK_q)
 									|| (ctrl && key == SDLK_w))
 								{
+									fprintf(stderr, "[EXIT] key %d\n", (int) key);
+									fflush(stderr);
 									goto done;
 								}
 								else if (ctrl && key == SDLK_p)
@@ -1413,13 +1746,27 @@ int	dump_tree_ms = -1;
 							}
 
 						case SDL_MOUSEMOTION:
+							if (ignore_real_mouse_input()) break;
 							mouse_x = (int) (event.motion.x / scale_x);
 							mouse_y = (int) (event.motion.y / scale_y);
+							if (log_sdl_mouse_events())
+							{
+								fprintf(stderr, "[SDLMOT] %d,%d\n", mouse_x, mouse_y);
+								fflush(stderr);
+							}
 							break;
 
 					case SDL_MOUSEBUTTONDOWN:
 					case SDL_MOUSEBUTTONUP:
 							{
+								if (ignore_real_mouse_input()) break;
+								if (log_sdl_mouse_events())
+								{
+									fprintf(stderr, "[SDLBTN] button=%d state=%d at %d,%d\n",
+										(int) event.button.button, (int) event.button.state,
+										(int) event.button.x, (int) event.button.y);
+									fflush(stderr);
+								}
 								int	mask = 1 << (event.button.button - 1);
 								if (event.button.state == SDL_PRESSED)
 								{
@@ -1433,6 +1780,8 @@ int	dump_tree_ms = -1;
 							}
 
 						case SDL_QUIT:
+							fprintf(stderr, "[EXIT] SDL_QUIT\n");
+							fflush(stderr);
 							goto done;
 							break;
 
@@ -1517,7 +1866,7 @@ int	dump_tree_ms = -1;
 			// loop frame and release two frames later, so root::on_mouse_event
 			// sees a real press -> release on the same character (which is what
 			// turns into an AS3 "click").  Multiple -clk options run in order.
-			if (auto_click_count > 0)
+			if (auto_click_count > 0 && !gestures_on)
 			{
 				static int s_click_frame = 0;
 				s_click_frame++;
@@ -1717,7 +2066,7 @@ int	dump_tree_ms = -1;
 
 			// Test hook (-drag): hover, press, interpolated move while
 			// held, release.  Independent of -clk.
-			if (auto_drag_count > 0)
+			if (auto_drag_count > 0 && !gestures_on)
 			{
 				static int s_drag_frame = 0;
 				s_drag_frame++;
@@ -1845,6 +2194,346 @@ int	dump_tree_ms = -1;
 				}
 			}
 
+			// -gestures playback: run exactly one scripted entry at a time.
+			// Wait entries block (the pointer is left untouched) until their
+			// condition holds; action entries then own the pointer for the
+			// frames they need.  This is what lets a press/travel/release be
+			// replayed without a real mouse.
+			if (gestures_on && !g_quit && g_index < (int) gestures.size())
+			{
+				scheduled_gesture_t& g = gestures[g_index];
+				bool done = false;
+
+				switch (g.kind)
+				{
+				case GK_WAITMS:
+					if ((int) (ticks - start_ticks) >= g.wait_ms) { done = true; }
+					break;
+
+				case GK_WAITFRAME:
+					{
+						gameswf::character* fc = m->find_named_in_tree(frame_char.c_str());
+						if (fc != NULL && fc->get_current_frame() >= g.wait_frame) { done = true; }
+					}
+					break;
+
+				case GK_WAITNAME:
+					if (m->find_named_in_tree(g.name.c_str()) != NULL) { done = true; }
+					break;
+
+				case GK_WAITHIT:
+					{
+						gameswf::character* te = m->hit_test_pixel((float) g.x, (float) g.y);
+						if (te != NULL && tu_string(te->get_name().c_str()) == g.name) { done = true; }
+					}
+					break;
+
+				case GK_DUMP:
+					m->dump_named_tree();
+					done = true;
+					break;
+
+				case GK_MOVETO:
+					mouse_x = g.x;
+					mouse_y = g.y;
+					done = true;
+					break;
+
+				case GK_PRESS:
+					mouse_buttons |= 1;
+					done = true;
+					break;
+
+				case GK_RELEASE:
+					mouse_buttons &= ~1;
+					done = true;
+					break;
+
+				case GK_CLICKNAME:
+					{
+						// Resolve the aim point lazily (the clip may not be
+						// pressable yet), then behave exactly like GK_CLICK.
+						// find_click_point sweeps the clip's area, so it is
+						// rate limited while waiting.
+						if (g.step == 0 || (g.step % 20) == 0)
+						{
+							gameswf::character* ch = m->find_named_in_tree(g.name.c_str());
+							float cx = 0, cy = 0;
+							if (ch != NULL && m->find_click_point(ch, &cx, &cy))
+							{
+								g.x = (int) cx;
+								g.y = (int) cy;
+								g.step = 0;
+								g.kind = GK_CLICK;
+							}
+						}
+						if (g.kind == GK_CLICKNAME)
+						{
+							g.step++;
+							break;
+						}
+					}
+					// fall through
+				case GK_CLICK:
+					{
+						// hover (button up) -> press for two frames -> release
+						int hover = g.dur > 0 ? g.dur : 4;
+						int t = g.step;
+						mouse_x = g.x;
+						mouse_y = g.y;
+						if (t < hover)		{ mouse_buttons &= ~1; }
+						else if (t < hover + 2)	{ mouse_buttons |= 1; }
+						else			{ mouse_buttons &= ~1; }
+						g.step++;
+						if (g.step >= hover + 3) { done = true; }
+					}
+					break;
+
+				case GK_DRAG:
+					{
+						// hover on the grab point -> press -> travel in a
+						// straight line -> release
+						int hover = 4;
+						int dur = g.dur > 0 ? g.dur : 15;
+						int t = g.step;
+						if (t < hover)
+						{
+							mouse_x = g.x1; mouse_y = g.y1; mouse_buttons &= ~1;
+						}
+						else if (t == hover)
+						{
+							mouse_x = g.x1; mouse_y = g.y1; mouse_buttons |= 1;
+						}
+						else if (t <= hover + dur)
+						{
+							int s = t - hover;
+							mouse_x = g.x1 + (g.x2 - g.x1) * s / dur;
+							mouse_y = g.y1 + (g.y2 - g.y1) * s / dur;
+							mouse_buttons |= 1;
+						}
+						else
+						{
+							mouse_x = g.x2; mouse_y = g.y2; mouse_buttons &= ~1;
+						}
+						g.step++;
+						if (g.step > hover + dur + 1) { done = true; }
+					}
+					break;
+
+				case GK_DRAGNAME:
+					{
+						// Resolve the grab point once, then behave like GK_DRAG.
+						// find_click_point() probes the clip's area and keeps
+						// the first pixel whose hit test resolves back to that
+						// clip, so the press really lands on it.
+						if (g.step == 0)
+						{
+							gameswf::character* ch = m->find_named_in_tree(g.name.c_str());
+							float gx = 0, gy = 0;
+							if (ch != NULL && m->find_click_point(ch, &gx, &gy))
+							{
+								g.x1 = (int) gx;
+								g.y1 = (int) gy;
+								fprintf(stderr, "[GEST] dragname '%s' grab=(%d,%d) drop=(%d,%d)\n",
+									g.name.c_str(), g.x1, g.y1, g.x2, g.y2);
+								fflush(stderr);
+							}
+							else
+							{
+								fprintf(stderr, "[GEST] dragname '%s' could not resolve a grab point\n",
+									g.name.c_str());
+								fflush(stderr);
+								done = true;
+								break;
+							}
+						}
+						if (done) { break; }
+						int hover = 4;
+						int dur = g.dur > 0 ? g.dur : 15;
+						int t = g.step;
+						if (t < hover)
+						{
+							mouse_x = g.x1; mouse_y = g.y1; mouse_buttons &= ~1;
+						}
+						else if (t == hover)
+						{
+							mouse_x = g.x1; mouse_y = g.y1; mouse_buttons |= 1;
+						}
+						else if (t <= hover + dur)
+						{
+							int s = t - hover;
+							mouse_x = g.x1 + (g.x2 - g.x1) * s / dur;
+							mouse_y = g.y1 + (g.y2 - g.y1) * s / dur;
+							mouse_buttons |= 1;
+						}
+						else
+						{
+							mouse_x = g.x2; mouse_y = g.y2; mouse_buttons &= ~1;
+						}
+						g.step++;
+						if (g.step > hover + dur + 1) { done = true; }
+					}
+					break;
+
+				case GK_DRAGPATH:
+					{
+						int npts = (int) g.path.size() / 2;
+						if (npts < 2) { done = true; break; }
+						int hover = 4;
+						int dur = g.dur > 0 ? g.dur : (npts - 1) * 10;
+						int t = g.step;
+						int px0 = g.path[0], py0 = g.path[1];
+						int pxn = g.path[(npts - 1) * 2], pyn = g.path[(npts - 1) * 2 + 1];
+						if (t < hover)
+						{
+							mouse_x = px0; mouse_y = py0; mouse_buttons &= ~1;
+						}
+						else if (t == hover)
+						{
+							mouse_x = px0; mouse_y = py0; mouse_buttons |= 1;
+						}
+						else if (t <= hover + dur)
+						{
+							// Walk the polyline by arc length so unevenly
+							// spaced waypoints do not change the speed.
+							double total = 0;
+							for (int i = 1; i < npts; i++)
+							{
+								double dx = g.path[i * 2] - g.path[(i - 1) * 2];
+								double dy = g.path[i * 2 + 1] - g.path[(i - 1) * 2 + 1];
+								total += sqrt(dx * dx + dy * dy);
+							}
+							double target = ((double) (t - hover) / (double) dur) * total;
+							double acc = 0;
+							mouse_x = pxn; mouse_y = pyn;
+							for (int i = 1; i < npts; i++)
+							{
+								double ax = g.path[(i - 1) * 2], ay = g.path[(i - 1) * 2 + 1];
+								double bx = g.path[i * 2], by = g.path[i * 2 + 1];
+								double dx = bx - ax, dy = by - ay;
+								double seg = sqrt(dx * dx + dy * dy);
+								if (acc + seg >= target && seg > 0)
+								{
+									double u = (target - acc) / seg;
+									mouse_x = (int) (ax + dx * u);
+									mouse_y = (int) (ay + dy * u);
+									break;
+								}
+								acc += seg;
+							}
+							mouse_buttons |= 1;
+						}
+						else
+						{
+							mouse_x = pxn; mouse_y = pyn; mouse_buttons &= ~1;
+						}
+						g.step++;
+						if (g.step > hover + dur + 1) { done = true; }
+					}
+					break;
+
+				case GK_MOVEPATH:
+					{
+						// Like dragpath but the button stays up: some steps
+						// only watch MOUSE_MOVE (the game has already called
+						// startDrag on the tool itself).
+						int npts = (int) g.path.size() / 2;
+						if (npts < 2) { done = true; break; }
+						int dur = g.dur > 0 ? g.dur : (npts - 1) * 10;
+						int t = g.step;
+						int px0 = g.path[0], py0 = g.path[1];
+						int pxn = g.path[(npts - 1) * 2], pyn = g.path[(npts - 1) * 2 + 1];
+						mouse_buttons &= ~1;
+						if (t <= 0)
+						{
+							mouse_x = px0; mouse_y = py0;
+						}
+						else if (t <= dur)
+						{
+							double total = 0;
+							for (int i = 1; i < npts; i++)
+							{
+								double dx = g.path[i * 2] - g.path[(i - 1) * 2];
+								double dy = g.path[i * 2 + 1] - g.path[(i - 1) * 2 + 1];
+								total += sqrt(dx * dx + dy * dy);
+							}
+							double target = ((double) t / (double) dur) * total;
+							double acc = 0;
+							mouse_x = pxn; mouse_y = pyn;
+							for (int i = 1; i < npts; i++)
+							{
+								double ax = g.path[(i - 1) * 2], ay = g.path[(i - 1) * 2 + 1];
+								double bx = g.path[i * 2], by = g.path[i * 2 + 1];
+								double dx = bx - ax, dy = by - ay;
+								double seg = sqrt(dx * dx + dy * dy);
+								if (acc + seg >= target && seg > 0)
+								{
+									double u = (target - acc) / seg;
+									mouse_x = (int) (ax + dx * u);
+									mouse_y = (int) (ay + dy * u);
+									break;
+								}
+								acc += seg;
+							}
+						}
+						else
+						{
+							mouse_x = pxn; mouse_y = pyn;
+						}
+						g.step++;
+						if (g.step > dur + 1) { done = true; }
+					}
+					break;
+
+				case GK_WASH:
+					{
+						// Rub a small circle around (g.x,g.y).  The pointer
+						// stays inside a few pixels, i.e. on a single target,
+						// so a game that fades a mask / advances a frame per
+						// mouseMove accumulates progress instead of resetting
+						// whenever the cursor leaves the object.
+						int dur = g.dur > 0 ? g.dur : 300;
+						int r = g.x1 > 0 ? g.x1 : 10;
+						int t = g.step;
+						double ang = t * 0.6;
+						mouse_x = g.x + (int) (r * cos(ang));
+						mouse_y = g.y + (int) (r * sin(ang));
+						mouse_buttons &= ~1;
+						g.step++;
+						if (g.step > dur) { done = true; }
+					}
+					break;
+
+				case GK_LISTPRESS:
+					m->list_pressable();
+					done = true;
+					break;
+
+				case GK_QUIT:
+					g_quit = true;
+					done = true;
+					break;
+
+				default:
+					done = true;
+					break;
+				}
+
+				if (done)
+				{
+					fprintf(stderr, "[GEST] done #%d kind=%d mouse=%d,%d\n",
+						g_index, g.kind, mouse_x, mouse_y);
+					fflush(stderr);
+					g_index++;
+				}
+			}
+
+			if (g_quit)
+			{
+				// Let the current frame render, then leave on the next one.
+				exit_timeout = 0.001f;
+			}
+
 			m->notify_mouse_state(mouse_x, mouse_y, mouse_buttons);
 
 				Uint32 t_advance = tu_timer::get_ticks();
@@ -1863,6 +2552,64 @@ int	dump_tree_ms = -1;
 				}
 				t_display = tu_timer::get_ticks() - t_display;
 
+				// Temporary diagnostic: GAMESWF_WATCH=name1,name2,... dumps the
+				// world bounds / frame / alpha of a handful of named clips so the
+				// state machine of a scripted sequence can be followed without a
+				// debugger.  Costs nothing when unset.
+				{
+					const char* watch = getenv("GAMESWF_WATCH");
+					extern int g_render_frames;
+					if (watch != NULL && watch[0] != 0 && (g_render_frames % 10) == 0)
+					{
+						char list[512];
+						strncpy(list, watch, sizeof(list) - 1);
+						list[sizeof(list) - 1] = 0;
+						fprintf(stderr, "[WATCH] f=%d mouse=%d,%d", g_render_frames, mouse_x, mouse_y);
+						char* p = list;
+						while (p != NULL && *p != 0)
+						{
+							char* comma = strchr(p, ',');
+							if (comma != NULL) { *comma = 0; }
+							gameswf::character* ch = m->find_named_in_tree(p);
+							if (ch == NULL)
+							{
+								fprintf(stderr, " %s=<none>", p);
+							}
+							else
+							{
+								gameswf::rect b;
+								ch->get_bound(&b);
+								// get_bound() is in the parent's space and already
+								// contains this clip's own matrix, so use the
+								// parent's world matrix - not the clip's own -
+								// otherwise the box lands off stage.
+								gameswf::matrix wm;
+								gameswf::character* parent = ch->get_parent();
+								if (parent != NULL)
+								{
+									wm = parent->get_world_matrix();
+								}
+								else
+								{
+									wm = ch->get_world_matrix();
+								}
+								wm.transform(&b);
+								gameswf::sprite_instance* sp =
+									gameswf::cast_to<gameswf::sprite_instance>(ch);
+								fprintf(stderr, " %s[z=%d vis=%d a=%.2f (%.0f,%.0f)-(%.0f,%.0f) fr=%d/%d]",
+									p, (int) ch->m_depth, (int) ch->m_visible, ch->get_cxform().m_[3][0],
+									b.m_x_min * 0.05f, b.m_y_min * 0.05f,
+									b.m_x_max * 0.05f, b.m_y_max * 0.05f,
+									sp ? sp->get_current_frame() : -1,
+									sp ? sp->get_frame_count() : -1);
+							}
+							p = (comma != NULL) ? comma + 1 : NULL;
+						}
+						fprintf(stderr, "\n");
+						fflush(stderr);
+					}
+				}
+
 		if (do_render)
 		{
 			// Framebuffer capture used for animation verification.
@@ -1872,6 +2619,14 @@ int	dump_tree_ms = -1;
 			// would be a stale/garbage frame rather than the frame we drew.
 			{
 				static int s_fb_frame = 0;
+				extern int g_render_frames;
+				g_render_frames++;
+				s_fb_frame = g_render_frames;
+				if ((g_render_frames % 500) == 0)
+				{
+					fprintf(stderr, "[RF] %d\n", g_render_frames);
+					fflush(stderr);
+				}
 				static int s_fb_dumps = 0;
 				s_fb_frame++;
 
@@ -1887,8 +2642,24 @@ int	dump_tree_ms = -1;
 
 				const char* max_s = getenv("GAMESWF_FB_MAX");
 				int fb_max = (max_s != NULL && max_s[0] != 0) ? atoi(max_s) : 400;
+				const char* start_s = getenv("GAMESWF_FB_START");
+				int fb_start = (start_s != NULL && start_s[0] != 0) ? atoi(start_s) : 0;
+				const char* startname_s = getenv("GAMESWF_FB_START_NAME");
+				static bool s_fb_named_seen = false;
+				bool named_ok = true;
+				if (startname_s != NULL && startname_s[0] != 0)
+				{
+					named_ok = s_fb_named_seen;
+					if (!s_fb_named_seen && m->find_named_in_tree(startname_s) != NULL)
+					{
+						s_fb_named_seen = true;
+						named_ok = true;
+					}
+				}
 
 				bool want = fb_enabled
+					&& (s_fb_frame >= fb_start)
+					&& named_ok
 					&& ((s_fb_frame <= 3) || ((s_fb_frame % every) == 0));
 
 				// GAMESWF_PICK=x,y dumps the display-list path drawn at that
@@ -1913,7 +2684,7 @@ int	dump_tree_ms = -1;
 						// Announce the capture so a log line can be matched to
 						// the exact image: the render-frame counter here is not
 						// the harness loop-frame counter.
-						fprintf(stderr, "[FB] n=%d\n", s_fb_frame);
+						fprintf(stderr, "[FB] n=%d mouse=%d,%d\n", s_fb_frame, mouse_x, mouse_y);
 						fflush(stderr);
 						if (do_pick)
 						{
@@ -1923,6 +2694,28 @@ int	dump_tree_ms = -1;
 								fprintf(stderr, "[PICK] probing %f,%f at frame %d\n", pxp, pyp, s_fb_frame);
 								fflush(stderr);
 								m->pick_report_at(pxp, pyp);
+								fflush(stderr);
+							}
+						}
+						// GAMESWF_TREE=n dumps the full display tree at frame n.
+						// GAMESWF_TREE_EVERY=k dumps it every k frames from n on.
+						{
+							const char* tree_s = getenv("GAMESWF_TREE");
+							const char* tree_every_s = getenv("GAMESWF_TREE_EVERY");
+							int tree_at = (tree_s && tree_s[0]) ? atoi(tree_s) : -1;
+							int tree_every = (tree_every_s && tree_every_s[0]) ? atoi(tree_every_s) : 0;
+							bool tree_now = false;
+							if (tree_at >= 0)
+							{
+								tree_now = (tree_every > 0)
+									? (s_fb_frame >= tree_at && ((s_fb_frame - tree_at) % tree_every) == 0)
+									: (s_fb_frame == tree_at);
+							}
+							if (tree_now)
+							{
+								fprintf(stderr, "[TREE] dump at frame %d\n", s_fb_frame);
+								fflush(stderr);
+								m->dump_tree();
 								fflush(stderr);
 							}
 						}
@@ -1995,6 +2788,8 @@ int	dump_tree_ms = -1;
 				if (do_loop == false && m->get_current_frame() + 1 == m->get_frame_count())
 				{
 					// We're reached the end of the movie; exit.
+					fprintf(stderr, "[EXIT] movie end\n");
+					fflush(stderr);
 					break;
 				}
 
@@ -2007,7 +2802,8 @@ int	dump_tree_ms = -1;
 			}
 
 	done:
-
+			fprintf(stderr, "[EXIT] done label reached\n");
+			fflush(stderr);
 
 			gameswf::set_sound_handler(NULL);
 			delete sound;

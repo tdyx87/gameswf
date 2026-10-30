@@ -27,13 +27,49 @@
 #endif
 
 #if AVM2_TRACE_ENABLED
-#define AVM2_TRACE_FPRINTF(...) fprintf(stderr, __VA_ARGS__)
+// Filtered trace: the full interpreter trace floods stderr on every method
+// call, which slows any timing-sensitive test and can exceed the disk.  When
+// GAMESWF_TRACE_KEEP is set, only lines containing one of the listed
+// markers survive.  Without it, everything is kept.
+	static void	avm2_trace_filter(const char* fmt, ...)
+	{
+		static int s_keep = -1;
+		if (s_keep < 0)
+		{
+			const char* e = getenv("GAMESWF_TRACE_KEEP");
+			// 1 = keep only marker-tagged lines, 2 = keep everything
+			s_keep = (e != NULL && e[0] == '2') ? 2 : ((e != NULL && e[0]) ? 1 : 0);
+		}
+		char buf[4096];
+		va_list ap;
+		va_start(ap, fmt);
+		int n = vsnprintf(buf, sizeof(buf) - 1, fmt, ap);
+		va_end(ap);
+		if (n <= 0) return;
+		buf[sizeof(buf) - 1] = 0;
+		bool keep = true;
+		if (s_keep == 1)
+		{
+			keep = (strstr(buf, "[CP") != NULL
+				|| strstr(buf, "[MLISTEN") != NULL
+				|| strstr(buf, "[DISPATCH") != NULL
+				|| strstr(buf, "[CHN") != NULL
+				|| strstr(buf, "[TIMELINE") != NULL);
+		}
+	if (keep)
+	{
+		fputs(buf, stderr);
+	}
+}
+#define AVM2_TRACE_FPRINTF(...) avm2_trace_filter(__VA_ARGS__)
 #else
 #define AVM2_TRACE_FPRINTF(...)
 #endif
 
 namespace gameswf
 {
+
+	int g_cur_avm2_method = -1;
 
 	// True when the ABC class described by ii derives, up to two levels, from a
 	// built-in display object class.  Mirrors the check done by constructprop.
@@ -710,6 +746,15 @@ namespace gameswf
 				if (arr->size() == 0)
 				{
 					target->set_member(event_key, as_value());
+					// Mirror the addEventListener hook: a non-character that
+					// lost its last enterFrame listener no longer needs the
+					// player-level dispatch.
+					if (event_key == "__events_enterFrame"
+						&& cast_to<character>(target) == NULL
+						&& target->get_player() != NULL)
+					{
+						target->get_player()->remove_frame_listener(target);
+					}
 				}
 				return true;
 			}
@@ -1022,6 +1067,55 @@ namespace gameswf
 		if (m_code.size() == 0)
 		{
 			return;
+		}
+
+		struct cur_meth_guard
+		{
+			int m_prev;
+			cur_meth_guard(int m) { m_prev = g_cur_avm2_method; g_cur_avm2_method = m; }
+			~cur_meth_guard() { g_cur_avm2_method = m_prev; }
+		} cmg(m_method);
+
+		// GAMESWF_TRACE_METHODS=a,b,c traces entry into the listed AS3
+		// methods.  The wash step advances through a chain of timer
+		// callbacks (944 -> 928 -> 924); if any link is skipped the level
+		// stops on its last frame, and the missing link is invisible in the
+		// normal logs.
+		{
+			static bool s_mtrace_init = false;
+			static int s_watch[32];
+			static int s_nwatch = 0;
+			if (!s_mtrace_init)
+			{
+				s_mtrace_init = true;
+				const char* e = getenv("GAMESWF_TRACE_METHODS");
+				if (e != NULL && e[0] != 0)
+				{
+					const char* p = e;
+					while (*p != 0 && s_nwatch < 32)
+					{
+						if (*p >= '0' && *p <= '9')
+						{
+							int v = 0;
+							while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+							s_watch[s_nwatch++] = v;
+						}
+						else
+						{
+							p++;
+						}
+					}
+				}
+			}
+			for (int i = 0; i < s_nwatch; i++)
+			{
+				if (s_watch[i] == m_method)
+				{
+					fprintf(stderr, "[MTRACE] enter method=%d\n", m_method);
+					fflush(stderr);
+					break;
+				}
+			}
 		}
 
 		{
@@ -1959,7 +2053,22 @@ namespace gameswf
 						{
 							event_type_str = event_type_val.to_string();
 						}
-						
+
+						{
+							static int s_al_diag = -1;
+							if (s_al_diag < 0)
+							{
+								const char* e = getenv("GAMESWF_EFRAMEDIAG");
+								s_al_diag = (e != NULL && e[0] == '1') ? 1 : 0;
+							}
+							if (s_al_diag)
+							{
+								fprintf(stderr, "[ADDLIS2] branch entered target=%p type='%s' nargs=%d\n",
+									(void*) target, event_type_str.c_str(), arg_count);
+								fflush(stderr);
+							}
+						}
+
 						if (target)
 						{
 							tu_string event_key = "__events_";
@@ -2026,6 +2135,31 @@ namespace gameswf
 							}
 						}
 						listeners_array->push(stored_listener);
+
+						// A plain as_object (AS3 `new Sprite()`, `new Shape()`,
+						// TweenLite's timingSprite, ...) is not part of the
+						// display tree, so no character ever advances it and
+						// its ENTER_FRAME listeners would never fire.  Hand it
+						// to the player, which dispatches enterFrame to these
+						// objects once per frame.  Characters keep their own
+						// path so they don't get the event twice.
+						if (event_type_str == "enterFrame"
+							&& cast_to<character>(target) == NULL)
+						{
+							get_player()->add_frame_listener(target);
+							static int s_efl_diag = -1;
+							if (s_efl_diag < 0)
+							{
+								const char* e = getenv("GAMESWF_EFRAMEDIAG");
+								s_efl_diag = (e != NULL && e[0] == '1') ? 1 : 0;
+							}
+							if (s_efl_diag)
+							{
+								fprintf(stderr, "[EFRAME] registered non-character enterFrame listener target=%p count=%d\n",
+									(void*) target, get_player()->m_frame_listeners.size());
+								fflush(stderr);
+							}
+						}
 						int lmeth = -1;
 						if (listener.is_function() && listener.to_function() != NULL
 							&& listener.to_function()->is(AS_3_FUNCTION))
@@ -2630,7 +2764,19 @@ namespace gameswf
 										ch ? ch->get_name().c_str() : "-");
 									fflush(stderr);
 								}
-								obj->set_member(name, stack.top(0));
+								// AS3 setproperty routes through setter traits.  A plain
+								// member write would also permanently shadow the
+								// getter/setter pair cached in m_members (e.g. a
+								// `x.isRunning = v` roundtrip then poisoned the getter),
+								// so invoke the setter exactly like reading a getter.
+								if (obj->is_setter_trait(name))
+								{
+									obj->invoke_setter(name.c_str(), stack.top(0));
+								}
+								else
+								{
+									obj->set_member(name, stack.top(0));
+								}
 							}
 
 							stack.drop(2);

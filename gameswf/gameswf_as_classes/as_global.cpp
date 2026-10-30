@@ -37,6 +37,20 @@ namespace gameswf
 		log_msg("%s\n", val);
 	}
 
+	// GAMESWF_TIMERDIAG=1 traces setInterval/setTimeout lifetime.  A timer
+	// that is swept before it fires silently stalls AS3 timelines that wait
+	// on it, so this is worth being able to see.
+	static bool timer_diag()
+	{
+		static int s = -1;
+		if (s < 0)
+		{
+			const char* e = getenv("GAMESWF_TIMERDIAG");
+			s = (e != NULL && e[0] != 0 && strcmp(e, "0") != 0) ? 1 : 0;
+		}
+		return s == 1;
+	}
+
 	// setInterval(functionReference:Function, interval:Number, [param1:Object, param2, ..., paramN]) : Number
 	// setInterval(objectReference:Object, methodName:String, interval:Number, [param1:Object, param2, ..., paramN]) : Number
 	void  as_global_setinterval(const fn_call& fn)
@@ -89,9 +103,20 @@ namespace gameswf
 
 			fn.get_root()->add_listener(t);
 			fn.result->set_as_object(t);
-			// Keep the timer alive even when the caller discards the
-			// return value (callpropvoid): listener::m_listeners is weak.
-			t->m_keepalive = t.get_ptr();
+			// Keep the timer alive even when the caller discards the return
+			// value (callpropvoid).  listener::m_listeners only holds weak
+			// pointers, and a gc_ptr inside the timer pointing at itself is a
+			// cycle the mark/sweep collector sweeps -- so the strong
+			// reference has to live outside the collected heap.
+			fn.get_player()->add_timer(t.get_ptr());
+			if (timer_diag())
+			{
+				extern int g_cur_avm2_method;
+				fprintf(stderr, "[TIMERADD] this=%p interval=%.3f once=%d live=%d from_m=%d\n",
+					(void*) t.get_ptr(), t->m_interval, (int) t->m_do_once,
+					fn.get_player()->m_timers.size(), g_cur_avm2_method);
+				fflush(stderr);
+			}
 		}
 		else
 		{
@@ -121,11 +146,9 @@ namespace gameswf
 		{
 			as_object* obj = fn.arg(0).to_object();
 			fn.get_root()->remove_listener(obj);
-			as_timer* t = cast_to<as_timer>(obj);
-			if (t)
-			{
-				t->m_keepalive = NULL;
-			}
+			// Drop the player-held strong reference; that may be the last one
+			// and free the timer, so nothing may touch it afterwards.
+			fn.get_player()->remove_timer(obj);
 		}
 	}
 
@@ -260,6 +283,12 @@ namespace gameswf
 			gc_ptr<as_object> obj = m_this_ptr.get_ptr();
 			as_value callback(m_func.get_ptr());
 
+			if (timer_diag())
+			{
+				fprintf(stderr, "[TIMER] fire this=%p interval=%.3f once=%d\n",
+					(void*) this, m_interval, (int) m_do_once);
+				fflush(stderr);
+			}
 
 			call_method(callback, &env, obj.get_ptr(), n, env.get_top_index());
 
@@ -270,13 +299,21 @@ namespace gameswf
 				{
 					r->remove_listener(this);
 				}
-				m_keepalive = NULL;	// must be last: may free this
+				// Releasing the player's strong reference may free this, so it
+				// has to be the last thing we do.
+				p->remove_timer(this);
 			}
 		}
 	}
 
 	as_timer::~as_timer()
 	{
+		if (timer_diag())
+		{
+			fprintf(stderr, "[TIMERDTOR] this=%p interval=%.3f once=%d\n",
+				(void*) this, m_interval, (int) m_do_once);
+			fflush(stderr);
+		}
 	}
 
 

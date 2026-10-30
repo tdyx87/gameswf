@@ -5,12 +5,16 @@
 
 #include "gameswf/gameswf_as_classes/as_math.h"
 #include "base/tu_random.h"
+#include <stdio.h>
+#include <stdlib.h>
 
 namespace gameswf
 {
 	//
 	// math object
 	//
+
+	extern int g_cur_avm2_method;
 
 
 #if 0
@@ -73,7 +77,13 @@ namespace gameswf
 	void	math_random(const fn_call& fn)
 	{
 		// Random number between 0 and 1.
-		fn.result->set_double(tu_random::next_random() / double(Uint32(0x0FFFFFFFF)));
+		double rnd = tu_random::next_random() / double(Uint32(0x0FFFFFFFF));
+		{
+			static int s_trace = -1;
+			if (s_trace < 0) { s_trace = getenv("GAMESWF_RNDTRACE") != NULL ? 1 : 0; }
+			if (s_trace) { fprintf(stderr, "[RND] %.6f caller_m=%d\n", rnd, g_cur_avm2_method); }
+		}
+		fn.result->set_double(rnd);
 	}
 	void	math_round(const fn_call& fn)
 	{

@@ -17,6 +17,8 @@
 namespace gameswf
 {
 
+	extern int g_cur_avm2_method;
+
 	//
 	// sprite built-in ActionScript methods
 	//
@@ -80,11 +82,37 @@ namespace gameswf
 		bool shape = fn.nargs >= 3 ? fn.arg(2).to_bool() : false;
 		bool hit = sprite->hit_test(x, y, shape);
 		fn.result->set_bool(hit);
+		// Diagnostic for the "hit" target used by the level's drag/drop checks.
+		// sprite_instance::get_bound() is already in *parent* space, so the
+		// parent's world matrix is the right transform here (transforming by
+		// the object's own world matrix would apply its matrix twice).
+		if (sprite->get_id() == 718 || sprite->get_name() == "hit")
+		{
+			rect b;
+			sprite->get_bound(&b);
+			if (sprite->get_parent() != NULL)
+			{
+				sprite->get_parent()->get_world_matrix().transform(&b);
+			}
+			b.twips_to_pixels();
+			bool in_rect = b.point_test((float) x, (float) y);
+			fprintf(stderr, "[HITTP] this='%s' id=%d x=%.1f y=%.1f shape=%d -> %d rect=(%.0f,%.0f)-(%.0f,%.0f) in_rect=%d parent='%s'\n",
+				sprite->get_name().c_str(), sprite->get_id(), x, y, (int) shape, (int) hit,
+				b.m_x_min, b.m_y_min, b.m_x_max, b.m_y_max, (int) in_rect,
+				sprite->get_parent() ? sprite->get_parent()->get_name().c_str() : "(null)");
+			fflush(stderr);
+		}
 	}
 
 	void	sprite_start_drag(const fn_call& fn)
 	{
 		sprite_instance* sprite = sprite_getptr(fn);
+
+		fprintf(stderr, "[STARTDRAG] this='%s' id=%d nargs=%d lock=%d\n",
+			sprite != NULL ? sprite->get_name().c_str() : "(null)",
+			sprite != NULL ? sprite->get_id() : -1, (int) fn.nargs,
+			(int) (fn.nargs > 0 ? fn.arg(0).to_bool() : 0));
+		fflush(stderr);
 
 		character::drag_state ds;
 		ds.SetCharacter(sprite);
@@ -139,6 +167,12 @@ namespace gameswf
 	void	sprite_play(const fn_call& fn)
 	{
 		sprite_instance* sprite = sprite_getptr(fn);
+		if (sprite != NULL && sprite->get_id() == 750)
+		{
+			fprintf(stderr, "[PLAYCALL] play id=750 cur=%d from_method=%d\n",
+				sprite->get_current_frame(), gameswf::g_cur_avm2_method);
+			fflush(stderr);
+		}
 		sprite->set_play_state(character::PLAY);
 	}
 
@@ -160,6 +194,12 @@ namespace gameswf
 		// gotoAndPlay(NaN) will be ignored
 		if (fn.arg(0).is_string() || fn.arg(0).is_number() || fn.arg(0).is_property())
 		{
+			if (sprite->get_id() == 750)
+			{
+				fprintf(stderr, "[PLAYCALL] gotoAndPlay id=750 arg=%s cur=%d\n",
+					fn.arg(0).to_tu_string().c_str(), sprite->get_current_frame());
+				fflush(stderr);
+			}
 			sprite->goto_frame(fn.arg(0).to_tu_string());
 			sprite->set_play_state(character::PLAY);
 		}
@@ -617,6 +657,10 @@ namespace gameswf
 			{
 				int frame = fn.arg(i).to_int();
 				as_function* func = fn.arg(i + 1).to_function();
+				fprintf(stderr, "[AFS] addFrameScript frame=%d func=%p sprite=%p name='%s'\n",
+					frame, (void*) func, (void*) sprite,
+					sprite != NULL ? sprite->get_name().c_str() : "(null)");
+				fflush(stderr);
 				sprite->add_script(frame, func);
 			}
 		}

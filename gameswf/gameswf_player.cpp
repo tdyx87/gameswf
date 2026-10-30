@@ -994,6 +994,50 @@ namespace gameswf
 		m_force_realtime_framerate = force_realtime_framerate;
 	}
 
+	void player::remove_timer(as_object* timer)
+	{
+		for (int i = 0, n = m_timers.size(); i < n; i++)
+		{
+			if (m_timers[i].get_ptr() == timer)
+			{
+				m_timers.remove(i);
+				return;
+			}
+		}
+	}
+
+	void player::add_frame_listener(as_object* obj)
+	// Register a plain as_object that wants Event.ENTER_FRAME.  Only objects
+	// that are NOT characters are registered here: a character gets the event
+	// from sprite_instance::advance(), and dispatching it twice would double
+	// every frame handler.
+	{
+		if (obj == NULL)
+		{
+			return;
+		}
+		for (int i = 0, n = m_frame_listeners.size(); i < n; i++)
+		{
+			if (m_frame_listeners[i].get_ptr() == obj)
+			{
+				return;
+			}
+		}
+		m_frame_listeners.push_back(obj);
+	}
+
+	void player::remove_frame_listener(as_object* obj)
+	{
+		for (int i = 0, n = m_frame_listeners.size(); i < n; i++)
+		{
+			if (m_frame_listeners[i].get_ptr() == obj)
+			{
+				m_frame_listeners.remove(i);
+				return;
+			}
+		}
+	}
+
 	// garbage collector
 
 	void player::set_alive(as_object* obj)

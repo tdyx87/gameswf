@@ -122,6 +122,14 @@ namespace gameswf
 		// chain.  AVM2 property reads must invoke such traits and return the
 		// result; get_member() itself returns the raw getter function.
 		exported_module virtual bool	is_getter_trait(const char* name) const;
+		// AS3 property writes must route through a Trait_Setter (invoke it
+		// with the assigned value) instead of writing a plain member slot
+		// -- a plain write would also permanently shadow the getter/setter
+		// pair cached in m_members.  invoke_setter() finds the setter trait
+		// (like is_getter_trait walks the proto chain) and calls it with
+		// one argument; returns false when there is no setter trait.
+		exported_module virtual bool	is_setter_trait(const char* name) const;
+		exported_module virtual bool	invoke_setter(const char* name, const as_value& val);
 		exported_module virtual bool	on_event(const event_id& id);
 		exported_module virtual	void enumerate(as_environment* env);
 		exported_module virtual as_object* get_proto() const;

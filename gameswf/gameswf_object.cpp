@@ -14,7 +14,6 @@
 
 namespace gameswf
 {
-
 	const char*	next_slash_or_dot(const char* word);
 
 	void	as_object_addproperty(const fn_call& fn)
@@ -282,33 +281,74 @@ namespace gameswf
 			// Search instance traits for methods defined in AS3 instance bodies.
 			// Instance methods (add, frameHandler, etc.) live in instance_info.m_trait
 			// and are NOT in class_info.m_trait (which only has static methods).
+			// NOTE: a name can be declared more than once (get/set pair, or
+			// getter declared after other traits by the AS3 compiler), and
+			// the array order is not guaranteed to put the getter first.
+			// Property reads must resolve to the GETTER, so scan all
+			// matching traits and prefer Trait_Getter; only fall back to
+			// the first other match when no getter was found.
 			if (m_instance.get_ptr() != NULL)
 			{
+				// A name can be declared more than once (a get/set pair), and
+				// the trait array order is not guaranteed to put the getter
+				// first.  Property reads must resolve to the GETTER, so scan
+				// all matching traits and prefer Trait_Getter; only fall back
+				// to the first other match when no getter was found.
+				traits_info* first_setter = NULL;
+				traits_info* found_getter = NULL;
 				for (int i = 0; i < m_instance->m_trait.size(); i++)
 				{
 					traits_info* ti = m_instance->m_trait[i].get();
 					const char* traits_name = m_instance->m_abc->get_multiname(ti->m_name);
 
-					if (name == traits_name)
+					// NOTE: tu_stringi has no operator!= for const char*; writing
+					// `name != traits_name` would fall back to the implicit
+					// `operator const char*()` conversion and compare POINTERS,
+					// never the strings.  Always use operator== / !operator==.
+					if (!(name == traits_name))
 					{
-						if (ti->m_kind == traits_info::Trait_Method
-							|| ti->m_kind == traits_info::Trait_Getter
-							|| ti->m_kind == traits_info::Trait_Setter)
-						{
-							int method_index = ti->trait_method.m_method;
-							as_function* func = m_instance->m_abc->get_method(method_index);
-							if (func)
-							{
-								as_value method_val(func);
-								m_members.set(name, method_val);  // cache for future lookups
-								*val = method_val;
-								return true;
-							}
-							return false;
-						}
-						// Trait_Slot, Trait_Class etc. fall through to proto
-						break;
+						continue;
 					}
+
+					if (ti->m_kind == traits_info::Trait_Getter)
+					{
+						// Prefer the getter for reads.  Keep the first getter
+						// seen; a later getter of the same name still wins
+						// over an earlier method/setter.
+						if (found_getter == NULL)
+						{
+							found_getter = ti;
+						}
+						continue;
+					}
+
+					if (ti->m_kind == traits_info::Trait_Setter
+						|| ti->m_kind == traits_info::Trait_Method)
+					{
+						if (first_setter == NULL)
+						{
+							first_setter = ti;
+						}
+						continue;
+					}
+					// Trait_Slot, Trait_Class etc. fall through to proto
+					continue;
+				}
+
+				traits_info* chosen = (found_getter != NULL)
+					? found_getter : first_setter;
+				if (chosen != NULL)
+				{
+					int method_index = chosen->trait_method.m_method;
+					as_function* func = m_instance->m_abc->get_method(method_index);
+					if (func)
+					{
+						as_value method_val(func);
+						m_members.set(name, method_val);  // cache for future lookups
+						*val = method_val;
+						return true;
+					}
+					return false;
 				}
 			}
 
@@ -343,7 +383,7 @@ namespace gameswf
 
 		if(m_instance.get_ptr() != NULL)
 		{
-			// Search instance traits — handle both slots AND methods.
+			// Search instance traits �?handle both slots AND methods.
 			// Trait_Method must return true so findpropstrict can locate
 			// instance methods (add, frameHandler, stop, etc.)
 			for (int i = 0; i < m_instance->m_trait.size(); i++)
@@ -411,6 +451,103 @@ namespace gameswf
 			{
 				// This level declares the name but not as a getter; AS3
 				// gives the first declaration precedence, so stop here.
+				return false;
+			}
+		}
+		return false;
+	}
+
+	bool	as_object::is_setter_trait(const char* name) const
+	{
+		if (name == NULL)
+		{
+			return false;
+		}
+		for (const as_object* p = this; p != NULL; p = p->get_proto())
+		{
+			instance_info* ii = p->m_instance.get_ptr();
+			if (ii == NULL)
+			{
+				continue;
+			}
+			bool named = false;
+			for (int i = 0; i < ii->m_trait.size(); i++)
+			{
+				traits_info* ti = ii->m_trait[i].get();
+				if (ti == NULL)
+				{
+					continue;
+				}
+				const char* tn = ii->m_abc != NULL ? ii->m_abc->get_multiname(ti->m_name) : NULL;
+				if (tn == NULL || strcmp(tn, name) != 0)
+				{
+					continue;
+				}
+				named = true;
+				if (ti->m_kind == traits_info::Trait_Setter)
+				{
+					return true;
+				}
+			}
+			if (named)
+			{
+				// This level declares the name but not as a setter; AS3
+				// gives the first declaration precedence, so stop here.
+				return false;
+			}
+		}
+		return false;
+	}
+
+	bool	as_object::invoke_setter(const char* name, const as_value& val)
+	{
+		if (name == NULL)
+		{
+			return false;
+		}
+		for (as_object* p = this; p != NULL; p = p->get_proto())
+		{
+			instance_info* ii = p->m_instance.get_ptr();
+			if (ii == NULL)
+			{
+				continue;
+			}
+			abc_def* abc = ii->m_abc.get_ptr();
+			if (abc == NULL)
+			{
+				continue;
+			}
+			bool named = false;
+			for (int i = 0; i < ii->m_trait.size(); i++)
+			{
+				traits_info* ti = ii->m_trait[i].get();
+				if (ti == NULL)
+				{
+					continue;
+				}
+				const char* tn = abc->get_multiname(ti->m_name);
+				if (tn == NULL || strcmp(tn, name) != 0)
+				{
+					continue;
+				}
+				named = true;
+				if (ti->m_kind == traits_info::Trait_Setter)
+				{
+					as_function* fn = abc->get_method(ti->trait_method.m_method);
+					if (fn == NULL)
+					{
+						return false;
+					}
+					as_environment env(get_player());
+					env.push(val);
+					IF_VERBOSE_ACTION(log_msg("EX: setter\t %s(%s)\n", name,
+						val.to_xstring()));
+					call_method(fn, &env, as_value(p), 1, env.get_top_index());
+					return true;
+				}
+			}
+			if (named)
+			{
 				return false;
 			}
 		}

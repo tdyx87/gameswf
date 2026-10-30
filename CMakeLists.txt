@@ -12,6 +12,8 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(GAMESWF_BUILD_PLAYER "Build gameswf_test_ogl player" ON)
 option(GAMESWF_ENABLE_SOUND "Enable sound support via SDL_mixer" ON)
 option(GAMESWF_ENABLE_FREETYPE "Enable FreeType for font rendering" ON)
+option(GAMESWF_SPRITE_TRACE "Enable verbose sprite/[GOTO] stderr tracing" OFF)
+option(GAMESWF_AVM2_TRACE "Enable verbose AVM2 interpreter stderr tracing" OFF)
 
 # Output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -356,6 +358,12 @@ target_compile_definitions(base PUBLIC ${SDL2_CFLAGS_OTHER})
 
 # Create gameswf library
 add_library(gameswf ${GAMESWF_SOURCES})
+if(GAMESWF_SPRITE_TRACE)
+	target_compile_definitions(gameswf PUBLIC SPRITE_TRACE_ENABLED=1)
+endif()
+if(GAMESWF_AVM2_TRACE)
+	target_compile_definitions(gameswf PUBLIC AVM2_TRACE_ENABLED=1)
+endif()
 target_link_libraries(gameswf
     PUBLIC
         base

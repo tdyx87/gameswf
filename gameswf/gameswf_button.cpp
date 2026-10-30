@@ -312,10 +312,72 @@ namespace gameswf
 			point	p;
 			get_matrix().transform_by_inverse(&p, point(x, y));
 
+			// SWF semantics: if a button has no explicit HitTest state,
+			// the Up state's shape is used for hit testing.  Without this
+			// fallback buttons authored without a hit record can never be
+			// clicked at all.
+			bool has_hit_record = false;
+			for (int i = 0; i < m_def->m_button_records.size(); i++)
+			{
+				if (m_def->m_button_records[i].m_character_id >= 0
+					&& m_def->m_button_records[i].m_hit_test)
+				{
+					has_hit_record = true;
+					break;
+				}
+			}
+
+			{
+				static int s_bd = -1;
+				static int s_cnt = 0;
+				if (s_bd < 0)
+				{
+					const char* e = getenv("GAMESWF_BUTTONDIAG");
+					s_bd = (e && e[0]) ? 1 : 0;
+				}
+				if (s_bd && s_cnt < 3000 && get_name().size() > 0)
+				{
+					s_cnt++;
+					extern int g_render_frames;
+					fprintf(stderr, "[BTNHT] rf=%d name='%s' id=%d in=(%.1f,%.1f) p=(%.1f,%.1f) m=(%.4f,%.4f,%.4f,%.4f) recs=%d has_hit=%d",
+						g_render_frames, get_name().c_str(), get_id(), (double) x, (double) y,
+						(double) p.m_x, (double) p.m_y,
+						(double) get_matrix().m_[0][0], (double) get_matrix().m_[0][1],
+						(double) get_matrix().m_[1][0], (double) get_matrix().m_[1][1],
+						m_def->m_button_records.size(), (int) has_hit_record);
+					for (int i = 0; i < m_def->m_button_records.size(); i++)
+					{
+						button_record& rr = m_def->m_button_records[i];
+						bool inside = false;
+						if (rr.m_character_def)
+						{
+							point sp;
+							rr.m_button_matrix.transform_by_inverse(&sp, p);
+							inside = rr.m_character_def->point_test_local(sp.m_x, sp.m_y);
+						}
+						fprintf(stderr, " [%d cid=%d u=%d d=%d o=%d h=%d in=%d]",
+							i, rr.m_character_id, (int) rr.m_up, (int) rr.m_down,
+							(int) rr.m_over, (int) rr.m_hit_test, (int) inside);
+					}
+					fprintf(stderr, "\n");
+					fflush(stderr);
+				}
+			}
+
 			for (int i = 0; i < m_def->m_button_records.size(); i++)
 			{
 				button_record&	rec = m_def->m_button_records[i];
-				if (rec.m_character_id < 0 || rec.m_hit_test == false)
+				if (rec.m_character_id < 0)
+				{
+					continue;
+				}
+				bool hittable = rec.m_hit_test;
+				if (has_hit_record == false)
+				{
+					// Fallback to the Up state (or whatever state exists).
+					hittable = rec.m_up || rec.m_down || rec.m_over;
+				}
+				if (hittable == false)
 				{
 					continue;
 				}
@@ -554,37 +616,50 @@ namespace gameswf
 
 		virtual void	get_bound(rect* bound)
 		{
+			// The union of every record that has a live character.  This is
+			// a superset of the current-state bounds, which is fine for a
+			// bounding box and, unlike the previous implementation, never
+			// leaves the caller's rect uninitialized (n == 0) or at
+			// (+-FLT_MAX) when no record matches the current mouse state.
+			// Those cases overflowed to (+-inf) once a parent transformed
+			// them, poisoning the bounds of every container holding a
+			// button and breaking hit-testing on it.
 			int n = m_def->m_button_records.size();
-			if (n == 0)
-			{
-				return;
-			}
-
-			bound->m_x_min = FLT_MAX;
-			bound->m_x_max = - FLT_MAX;
-			bound->m_y_min = FLT_MAX;
-			bound->m_y_max = - FLT_MAX;
-
+			bool have = false;
 			matrix m = get_matrix();
 			for (int i = 0; i < n; i++)
 			{
-				button_record&	rec = m_def->m_button_records[i];
 				if (m_record_character[i] == NULL)
 				{
 					continue;
 				}
-				if ((m_mouse_state == UP && rec.m_up)
-					|| (m_mouse_state == DOWN && rec.m_down)
-					|| (m_mouse_state == OVER && rec.m_over))
+
+				rect ch_bound;
+				ch_bound.m_x_min = 0;
+				ch_bound.m_y_min = 0;
+				ch_bound.m_x_max = 0;
+				ch_bound.m_y_max = 0;
+				m_record_character[i]->get_bound(&ch_bound);
+
+				m.transform(&ch_bound);
+
+				if (!have)
 				{
-
-					rect ch_bound;
-					m_record_character[i]->get_bound(&ch_bound);
-
-					m.transform(&ch_bound);
-
+					*bound = ch_bound;
+					have = true;
+				}
+				else
+				{
 					bound->expand_to_rect(ch_bound);
 				}
+			}
+
+			if (!have)
+			{
+				bound->m_x_min = 0;
+				bound->m_x_max = 0;
+				bound->m_y_min = 0;
+				bound->m_y_max = 0;
 			}
 		}
 
@@ -740,6 +815,64 @@ namespace gameswf
 	}
 
 
+
+	void	button_character_definition::get_bound(rect* bound)
+	// The bounding box of a button is the union of the boxes of its
+	// state/hit records, each transformed by its own placement matrix.
+	// Without this override the base character_def::get_bound() is the
+	// assert(0) stub, which in release builds leaves the caller's rect
+	// uninitialized (observed as (-inf,-inf)-(inf,inf)), poisoning the
+	// bounds of every container that holds a button.
+	{
+		bool have = false;
+		for (int i = 0; i < m_button_records.size(); i++)
+		{
+			button_record& rec = m_button_records[i];
+			if (rec.m_character_id < 0 || rec.m_character_def == NULL)
+			{
+				continue;
+			}
+
+			rect r;
+			r.m_x_min = r.m_y_min = r.m_x_max = r.m_y_max = 0;
+			rec.m_character_def->get_bound(&r);
+			rec.m_button_matrix.transform(&r);
+
+			{
+				static int s_bd = -1;
+				if (s_bd < 0)
+				{
+					const char* e = getenv("GAMESWF_BUTTONDIAG");
+					s_bd = (e && e[0]) ? 1 : 0;
+				}
+				if (s_bd)
+				{
+					fprintf(stderr, "[BUTTONDIAG] btn=%p rec=%d cid=%d hit=%d def=%p subbound=(%g,%g)-(%g,%g)\n",
+						(void*) this, i, rec.m_character_id, (int) rec.m_hit_test, (void*) rec.m_character_def,
+						(double) r.m_x_min, (double) r.m_y_min, (double) r.m_x_max, (double) r.m_y_max);
+					fflush(stderr);
+				}
+			}
+
+			if (!have)
+			{
+				*bound = r;
+				have = true;
+			}
+			else
+			{
+				bound->expand_to_rect(r);
+			}
+		}
+
+		if (!have)
+		{
+			bound->m_x_min = 0;
+			bound->m_x_max = 0;
+			bound->m_y_min = 0;
+			bound->m_y_max = 0;
+		}
+	}
 
 	void	button_character_definition::read(stream* in, int tag_type, movie_definition_sub* m)
 	// Initialize from the given stream.

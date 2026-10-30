@@ -17,6 +17,7 @@
 #include "gameswf/gameswf_shape.h"
 #include "gameswf/gameswf_sprite.h"
 #include "gameswf/gameswf_impl.h"
+#include "gameswf/gameswf_avm2.h"
 #include "base/tu_random.h"
 
 #ifdef _WIN32
@@ -32,6 +33,20 @@ namespace gameswf
 	tu_mutex& gameswf_engine_mutex()
 	{
 		return s_gameswf_engine;
+	}
+
+	// Mouse tracing used to run unconditionally, and the drag trace fires on
+	// every frame of a drag with an fflush -- enough to starve the frame rate
+	// that AS3 timers depend on.  Off unless asked for.
+	static bool mouse_diag()
+	{
+		static int s = -1;
+		if (s < 0)
+		{
+			const char* e = getenv("GAMESWF_MOUSEDIAG");
+			s = (e != NULL && e[0] != 0 && strcmp(e, "0") != 0) ? 1 : 0;
+		}
+		return s == 1;
 	}
 
 	root::root(player* player, movie_def_impl* def)	:
@@ -134,6 +149,20 @@ namespace gameswf
 			{
 				m_mouse_listener.notify(event_id::MOUSE_UP);
 
+				// AS3 MouseEvent.MOUSE_UP on the stage: the stage is the
+				// root movie, and games use `stage.addEventListener(
+				// MouseEvent.MOUSE_UP, ...)` to end a drag gesture that
+				// started on one of their own objects.  The release has to
+				// reach the stage no matter which object was under the
+				// cursor.
+				if (m_movie != NULL)
+				{
+					fprintf(stderr, "[STAGEUP] movie=%p name=%s\n",
+						(void*) m_movie, m_movie->get_name().c_str());
+					fflush(stderr);
+					m_movie->on_event(event_id::MOUSE_UP);
+				}
+
 				if( topmost_entity == active_entity )
 				{
 					// onRelease
@@ -191,6 +220,13 @@ namespace gameswf
 			// mouse button press
 			{
 				// onPress
+				{
+				character* pe = active_entity.get_ptr();
+				fprintf(stderr, "[PRESSBR] raw=%d active='%s' mouse=%.1f,%.1f\n",
+					m_mouse_buttons, pe != NULL ? pe->get_name().c_str() : "-",
+					(float) m_mouse_x, (float) m_mouse_y);
+					fflush(stderr);
+				}
 
 				// The mouse may have reached a new object since the last
 				// roll update (movement across a frame boundary or a
@@ -273,9 +309,42 @@ namespace gameswf
 					if (move_te != s_last_move_te)
 					{
 						s_last_move_te = move_te;
+						sprite_instance* msp = cast_to<sprite_instance>(move_te);
+						character* par = move_te->get_parent();
+						rect mlb;
+						move_te->get_bound(&mlb);
+						{
+							as_value mval;
+							double malpha = -1.0;
+							if (move_te->get_member("alpha", &mval) && mval.is_number())
+							{
+								malpha = mval.to_number();
+							}
+							fprintf(stderr, "[MMOVE] te='%s' id=%d ty='%s' par='%s' depth=%d vis=%d alpha=%.3f at %d,%d lb=(%.0f,%.0f)-(%.0f,%.0f) en=%d ch=%d\n",
+								move_te->get_name().c_str(), move_te->get_id(), move_te->type_of(),
+								par != NULL ? par->get_name().c_str() : "-",
+								move_te->get_depth(), (int) move_te->get_visible(),
+								malpha,
+								ms->m_x, ms->m_y,
+								(float) TWIPS_TO_PIXELS(mlb.m_x_min), (float) TWIPS_TO_PIXELS(mlb.m_y_min),
+								(float) TWIPS_TO_PIXELS(mlb.m_x_max), (float) TWIPS_TO_PIXELS(mlb.m_y_max),
+								msp ? (int) msp->get_mouse_flag("mouseEnabled", true) : -1,
+								msp ? (int) msp->get_mouse_flag("mouseChildren", true) : -1);
+						}
+						fflush(stderr);
 					}
 					move_te->on_event(event_id::MOUSE_MOVE);
 				}
+			}
+
+			// Flash dispatches mouseMove to the stage as well, so that
+			// `stage.addEventListener(MouseEvent.MOUSE_MOVE, ...)` fires
+			// even when the pointer is over empty space.  Without this,
+			// AS3 games that track the pointer on the stage (e.g. to
+			// follow the cursor with a spray nozzle) never see the move.
+			if (m_movie != NULL)
+			{
+				m_movie->on_event(event_id::MOUSE_MOVE);
 			}
 		}
 
@@ -489,6 +558,11 @@ namespace gameswf
 		m_mouse_x = x;
 		m_mouse_y = y;
 		m_mouse_buttons = buttons;
+		if (buttons != 0 && mouse_diag())
+		{
+			fprintf(stderr, "[NMS] buttons=%d at %d,%d\n", buttons, x, y);
+			fflush(stderr);
+		}
 
 		if (is_mouse_moved)
 		{
@@ -613,6 +687,22 @@ namespace gameswf
 		local.m_[0][2] = parentMouse.m_x;//set translation x
 		local.m_[1][2] = parentMouse.m_y;//set translation y
 		draggingChar->set_matrix( local );
+		if (mouse_diag())
+		{
+			matrix wm = draggingChar->get_world_matrix();
+			point wo(0, 0);
+			wm.transform(&wo, wo);
+			rect lb;
+			draggingChar->get_bound(&lb);
+			fprintf(stderr, "[DRAGTRK] name='%s' mouse=%d,%d local=%.1f,%.1f worigin=%.1f,%.1f lb=(%.0f,%.0f)-(%.0f,%.0f)\n",
+				draggingChar->get_name().c_str(), x, y,
+				(float) TWIPS_TO_PIXELS(parentMouse.m_x), (float) TWIPS_TO_PIXELS(parentMouse.m_y),
+				(float) TWIPS_TO_PIXELS(wo.m_x), (float) TWIPS_TO_PIXELS(wo.m_y),
+				(float) TWIPS_TO_PIXELS(lb.m_x_min), (float) TWIPS_TO_PIXELS(lb.m_y_min),
+				(float) TWIPS_TO_PIXELS(lb.m_x_max), (float) TWIPS_TO_PIXELS(lb.m_y_max));
+			fflush(stderr);
+		}
+		fflush(stderr);
 	}
 
 
@@ -769,6 +859,141 @@ namespace gameswf
 		pick_report(m_movie, x, y, 0);
 	}
 
+	// List every named clip in the display tree with its true stage-space
+	// bounding box, and say whether a press at the centre of that box would
+	// actually land on it.  A clip can be perfectly visible and still be
+	// un-grabbable because something else is painted on top of it, and that
+	// is exactly the question a drag gesture has to answer.
+	void	root::list_pressable_walk(character* ch, int depth)
+	{
+		if (ch == NULL || depth > 24)
+		{
+			return;
+		}
+
+		if (ch->get_name().size() > 0)
+		{
+			rect bound;
+			ch->get_bound(&bound);
+			matrix m;
+			character* parent = ch->get_parent();
+			if (parent != NULL)
+			{
+				m = parent->get_world_matrix();
+			}
+			else
+			{
+				m = ch->get_world_matrix();
+			}
+			rect area = bound;
+			m.transform(&area);
+			float x0 = (float) TWIPS_TO_PIXELS(area.m_x_min);
+			float x1 = (float) TWIPS_TO_PIXELS(area.m_x_max);
+			float y0 = (float) TWIPS_TO_PIXELS(area.m_y_min);
+			float y1 = (float) TWIPS_TO_PIXELS(area.m_y_max);
+			float cx = (x0 + x1) * 0.5f;
+			float cy = (y0 + y1) * 0.5f;
+
+			// Ask the engine what a press at the centre resolves to, and
+			// also probe the four corners of the box: a clip built from
+			// several pieces often has an empty middle.
+			character* hit = hit_test_pixel(cx, cy);
+			const char* hit_name = (hit != NULL) ? hit->get_name().c_str() : "(null)";
+			int self_hit = (hit == ch) ? 1 : 0;
+			if (!self_hit)
+			{
+				character* h2 = hit_test_pixel(x0 + 2, y0 + 2);
+				if (h2 == ch) { self_hit = 1; hit = h2; hit_name = hit->get_name().c_str(); }
+				else
+				{
+					character* h3 = hit_test_pixel(x1 - 2, y0 + 2);
+					if (h3 == ch) { self_hit = 1; hit = h3; hit_name = hit->get_name().c_str(); }
+					else
+					{
+						character* h4 = hit_test_pixel(x0 + 2, y1 - 2);
+						if (h4 == ch) { self_hit = 1; hit = h4; hit_name = hit->get_name().c_str(); }
+					}
+				}
+			}
+			fprintf(stderr, "[PRESS] %*s%-12s id=%-5d z=%-6d vis=%d box=(%.0f,%.0f)-(%.0f,%.0f) on_stage=%d press=%d hit='%s'\n",
+				depth * 2, "", ch->get_name().c_str(), ch->get_id(), ch->get_depth(),
+				(int) ch->m_visible,
+				x0, y0, x1, y1,
+				(int) (x0 >= 0 && y0 >= 0 && x1 <= get_movie_width() && y1 <= get_movie_height()),
+				self_hit, hit_name);
+		}
+
+		sprite_instance* sp = cast_to<sprite_instance>(ch);
+		if (sp == NULL)
+		{
+			return;
+		}
+		int n = sp->avm2_get_num_children();
+		for (int i = 0; i < n; i++)
+		{
+			list_pressable_walk(sp->avm2_get_child_at(i), depth + 1);
+		}
+	}
+
+	void	root::list_pressable()
+	{
+		list_pressable_walk(m_movie, 0);
+		fflush(stderr);
+	}
+
+	// GAMESWF_TREE dump: print the whole display tree (every character, not
+	// just bounds-matching ones) so instance names and structure can be
+	// correlated with on-screen artifacts.
+	static void dump_tree_walk(character* ch, int depth)
+	{
+		if (ch == NULL)
+		{
+			return;
+		}
+
+		rect local;
+		ch->get_bound(&local);
+		matrix m = ch->get_world_matrix();
+		rect area = local;
+		m.transform(&area);
+
+		sprite_instance* sp = cast_to<sprite_instance>(ch);
+		if (sp)
+		{
+			fprintf(stderr, "[TREE]%*sid=%-5d %-6s name='%s' z=%d vis=%d bounds=(%.0f,%.0f)-(%.0f,%.0f) frame=%d/%d\n",
+				depth, "", ch->get_id(),
+				"sprite",
+				ch->get_name().c_str(), (int) ch->m_depth, (int) ch->m_visible,
+				(float) TWIPS_TO_PIXELS(area.m_x_min), (float) TWIPS_TO_PIXELS(area.m_y_min),
+				(float) TWIPS_TO_PIXELS(area.m_x_max), (float) TWIPS_TO_PIXELS(area.m_y_max),
+				sp->get_current_frame(), sp->get_frame_count());
+		}
+		else
+		{
+			fprintf(stderr, "[TREE]%*sid=%-5d %-6s name='%s' z=%d vis=%d bounds=(%.0f,%.0f)-(%.0f,%.0f)\n",
+				depth, "", ch->get_id(),
+				"other",
+				ch->get_name().c_str(), (int) ch->m_depth, (int) ch->m_visible,
+				(float) TWIPS_TO_PIXELS(area.m_x_min), (float) TWIPS_TO_PIXELS(area.m_y_min),
+				(float) TWIPS_TO_PIXELS(area.m_x_max), (float) TWIPS_TO_PIXELS(area.m_y_max));
+		}
+
+		if (sp == NULL)
+		{
+			return;
+		}
+		int n = sp->avm2_get_num_children();
+		for (int i = 0; i < n; i++)
+		{
+			dump_tree_walk(sp->avm2_get_child_at(i), depth + 1);
+		}
+	}
+
+	void	root::dump_tree()
+	{
+		dump_tree_walk(m_movie, 0);
+	}
+
 	static bool is_descendant_of(character* ch, character* ancestor)
 	{
 		for (character* c = ch; c != NULL; c = c->get_parent())
@@ -879,7 +1104,21 @@ namespace gameswf
 			return false;
 		}
 
-		matrix m = ch->get_world_matrix();
+		// get_bound() returns the box in the PARENT's coordinate space, and it
+		// already contains this character's own matrix.  Multiplying by our own
+		// world matrix would apply that matrix a second time and report
+		// positions far outside the stage, so use the parent's world matrix
+		// instead (our own matrix for a root-level object).
+		matrix m;
+		character* parent = ch->get_parent();
+		if (parent != NULL)
+		{
+			m = parent->get_world_matrix();
+		}
+		else
+		{
+			m = ch->get_world_matrix();
+		}
 		point p((bound.m_x_min + bound.m_x_max) / 2,
 				(bound.m_y_min + bound.m_y_max) / 2);
 		m.transform(&p, p);
@@ -902,9 +1141,32 @@ namespace gameswf
 			if (stage_center_of(ch, &cx, &cy))
 			{
 				sprite_instance* sp = cast_to<sprite_instance>(ch);
-				fprintf(stderr, "[TREE] %*s%s id=%d depth=%d at %.0f,%.0f frame=%d\n",
+				// Report the bounding box in STAGE pixels, so the numbers can
+				// be fed straight back into a gesture.  get_bound() is in the
+				// parent's space, so use the parent's world matrix (our own
+				// matrix for a root-level object) - see stage_center_of().
+				matrix pm;
+				character* parent = ch->get_parent();
+				if (parent != NULL)
+				{
+					pm = parent->get_world_matrix();
+				}
+				else
+				{
+					pm = ch->get_world_matrix();
+				}
+				point po(0, 0);
+				pm.transform(&po, po);
+				rect lb;
+				ch->get_bound(&lb);
+				pm.transform(&lb);
+				fprintf(stderr, "[TREE] %*s%s id=%d depth=%d at %.0f,%.0f origin=%.0f,%.0f lb=(%.0f,%.0f)-(%.0f,%.0f) frame=%d\n",
 					depth * 2, "", ch->get_name().c_str(), ch->get_id(),
-					ch->get_depth(), cx, cy, sp ? sp->get_current_frame() : -1);
+					ch->get_depth(), cx, cy,
+					(float) TWIPS_TO_PIXELS(po.m_x), (float) TWIPS_TO_PIXELS(po.m_y),
+					(float) TWIPS_TO_PIXELS(lb.m_x_min), (float) TWIPS_TO_PIXELS(lb.m_y_min),
+					(float) TWIPS_TO_PIXELS(lb.m_x_max), (float) TWIPS_TO_PIXELS(lb.m_y_max),
+					sp ? sp->get_current_frame() : -1);
 			}
 		}
 
@@ -1063,9 +1325,6 @@ namespace gameswf
 		// status of netstream object
 		gameswf_engine_mutex().lock();
 
-		// Handle mouse dragging
-		do_mouse_drag();
-
 		// Handle the mouse.
 		character *te;
 		m_movie->get_topmost_mouse_entity(te, PIXELS_TO_TWIPS(m_mouse_x), PIXELS_TO_TWIPS(m_mouse_y));
@@ -1159,6 +1418,60 @@ namespace gameswf
 			}
 
 			m_player->clear_garbage();
+
+			// Handle mouse dragging — apply after frame advance so drag position
+			// takes precedence over PlaceObject / frame-script matrix resets.
+			do_mouse_drag();
+
+			// Dispatch Event.ENTER_FRAME to plain as_objects that registered a
+			// listener but are not characters (AS3 `new Sprite()` is an
+			// as_object, not a character, so nothing advances it).  TweenLite
+			// parks its whole ticker on such a sprite, so without this every
+			// tween in a game freezes.  Characters get the event from
+			// sprite_instance::advance() and are never in this list.
+			if (m_player->m_frame_listeners.size() > 0)
+			{
+				static int s_efl_diag = -1;
+				static int s_efl_count = 0;
+				if (s_efl_diag < 0)
+				{
+					const char* e = getenv("GAMESWF_EFRAMEDIAG");
+					s_efl_diag = (e != NULL && e[0] == '1') ? 1 : 0;
+				}
+				s_efl_count++;
+				as_environment env(m_player.get_ptr());
+				array<gc_ptr<as_object> > listeners = m_player->m_frame_listeners;
+				for (int i = 0; i < listeners.size(); i++)
+				{
+					as_object* obj = listeners[i].get_ptr();
+					if (obj == NULL)
+					{
+						continue;
+					}
+					// Lazy prune: the listener array is gone when the game
+					// removed its last enterFrame listener (removeEventListener
+					// clears the member and unregisters, but a game may also
+					// just drop the object).
+					as_value lv;
+					if (!obj->get_member("__events_enterFrame", &lv) || !lv.is_object())
+					{
+						m_player->remove_frame_listener(obj);
+						i--;
+						continue;
+					}
+					gc_ptr<as_object> evt = new as_object(m_player.get_ptr());
+					evt->set_member("type", as_value("enterFrame"));
+					evt->set_member("bubbles", as_value(false));
+					evt->set_member("target", as_value(obj));
+					avm2_dispatch_event(obj, as_value(evt.get_ptr()), &env);
+					if (s_efl_diag && (s_efl_count % 60) == 0)
+					{
+						fprintf(stderr, "[EFRAME] dispatched to %d object(s) tick=%d\n",
+							(int) listeners.size(), s_efl_count);
+						fflush(stderr);
+					}
+				}
+			}
 		}
 
 		gameswf_engine_mutex().unlock();
