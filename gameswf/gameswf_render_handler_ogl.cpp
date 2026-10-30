@@ -789,17 +789,49 @@ struct render_handler_ogl : public gameswf::render_handler
 		gameswf::cxform	m_bitmap_color_transform;
 		bool	m_has_nonzero_bitmap_additive_color;
 		float m_width;	// for line style
-		
+		bitmap_blend_mode	m_blend_mode;	// Flash blend mode for this fill
+
 		fill_style() :
 			m_mode(INVALID),
-			m_has_nonzero_bitmap_additive_color(false)
+			m_has_nonzero_bitmap_additive_color(false),
+			m_blend_mode(BLEND_NORMAL)
 		{
+		}
+
+		void	apply_blend_mode() const
+		// Map the Flash blend mode onto an OpenGL blend function.  The
+		// previous renderer dropped the blend mode entirely, so additive /
+		// screen glows were drawn with plain alpha blending and came out
+		// far too dim (e.g. the yellow glow by the YOKO GAMES logo).
+		{
+			switch (m_blend_mode)
+			{
+				case BLEND_ADD:
+					// Flash "add": src*alpha added on top of dst.
+					glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+					break;
+				case BLEND_SCREEN:
+					glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR);
+					break;
+				case BLEND_MULTIPLY:
+					glBlendFunc(GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA);
+					break;
+				case BLEND_LAYER:
+				case BLEND_NORMAL:
+				default:
+					glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+					break;
+			}
 		}
 
 		void	apply(/*const matrix& current_matrix*/) const
 		// Push our style into OpenGL.
 		{
 			assert(m_mode != INVALID);
+
+			// Set the GL blend function for this fill's Flash blend mode
+			// (add/screen/multiply/...); plain alpha blending otherwise.
+			apply_blend_mode();
 
 			// Drain any stale GL errors from previous calls.
 			while (glGetError() != GL_NO_ERROR) {}
@@ -1207,6 +1239,7 @@ struct render_handler_ogl : public gameswf::render_handler
 	{
 		assert(fill_side >= 0 && fill_side <= 2);
 		m_current_styles[fill_side].set_bitmap(bi, m, wm, m_current_cxform);
+		m_current_styles[fill_side].m_blend_mode = bm;
 	}
 	
 	void	line_style_width(float width)
@@ -1339,6 +1372,10 @@ struct render_handler_ogl : public gameswf::render_handler
 		}
 
 		glDisableClientState(GL_VERTEX_ARRAY);
+
+		// Restore normal alpha blending so a fill's add/screen/multiply
+		// blend mode does not leak into unrelated draws (text, bitmaps).
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 		g_mesh_diag_count++;
 

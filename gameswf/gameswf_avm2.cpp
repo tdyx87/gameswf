@@ -2136,6 +2136,28 @@ namespace gameswf
 						}
 						listeners_array->push(stored_listener);
 
+						// Diagnostic: print the stage position of any character
+						// that gets a mouse listener, so we can hover the exact
+						// button spot (instead of guessing from screenshots).
+						if (event_type_str != "enterFrame")
+						{
+							static int s_br = -1;
+							if (s_br < 0)
+							{
+								const char* e = getenv("GAMESWF_BTNRECT");
+								s_br = (e && e[0] == '1') ? 1 : 0;
+							}
+							if (s_br && cast_to<character>(target) != NULL)
+							{
+								character* tch = cast_to<character>(target);
+								matrix wm = tch->get_world_matrix();
+								fprintf(stderr, "[BTNRECT] type='%s' name='%s' id=%d world=(%.0f,%.0f) sx=%.3f sy=%.3f\n",
+									event_type_str.c_str(), tch->get_name().c_str(), tch->get_id(),
+									wm.m_[0][2], wm.m_[1][2], wm.m_[0][0], wm.m_[1][1]);
+								fflush(stderr);
+							}
+						}
+
 						// A plain as_object (AS3 `new Sprite()`, `new Shape()`,
 						// TweenLite's timingSprite, ...) is not part of the
 						// display tree, so no character ever advances it and
@@ -4390,6 +4412,13 @@ namespace gameswf
 						avm2_seed_instance_slots(new_object.get_ptr(), ii);
 
 						as_function* c = class_name ? m_abc->get_class_constructor(tu_string(class_name)) : NULL;
+						if (class_name && (strcmp(class_name, "TweenMax") == 0 || strcmp(class_name, "TweenLite") == 0)
+							&& getenv("GAMESWF_CONSTRUCTDIAG"))
+						{
+							fprintf(stderr, "[CONSTRUCT] class='%s' cls_idx=%d ctor=%p args=%d\n",
+								class_name, cls->get_class_index(), (void*) c, arg_count);
+							fflush(stderr);
+						}
 						if (c)
 						{
 							call_method(c, &env, new_object.get_ptr(), arg_count, env.get_top_index());

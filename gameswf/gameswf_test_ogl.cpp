@@ -589,7 +589,7 @@ int	dump_tree_ms = -1;
 	bool	gestures_on = false;
 	tu_string	frame_char = "stepMC";	// clip watched by 'waitframe'
 		float	tex_lod_bias;
-		bool	force_realtime_framerate = false;
+		bool	force_realtime_framerate = true;
 
 	#ifdef _WIN32
 

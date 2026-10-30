@@ -339,6 +339,30 @@ namespace gameswf
 			}
 		}
 
+		// Diagnostic: log the generated gradient's center/edge colours so we
+		// can tell whether a pale gradient is a generation bug or a later
+		// (texture/cxform) problem.
+		{
+			static int s_gd = -1;
+			if (s_gd < 0)
+			{
+				const char* e = getenv("GAMESWF_GRADDIAG");
+				s_gd = (e && e[0] == '1') ? 1 : 0;
+			}
+			if (s_gd && (m_type == 0x12 || m_type == 0x13))
+			{
+				rgba c0 = sample_gradient(0);
+				rgba c128 = sample_gradient(128);
+				rgba c255 = sample_gradient(255);
+				fprintf(stderr, "[GRAD] type=0x%x stops=%d focal=%.3f center=(%d,%d,%d,%d) mid=(%d,%d,%d,%d) edge=(%d,%d,%d,%d)\n",
+					m_type, m_gradients.size(), (double) m_focal,
+					c0.m_r, c0.m_g, c0.m_b, c0.m_a,
+					c128.m_r, c128.m_g, c128.m_b, c128.m_a,
+					c255.m_r, c255.m_g, c255.m_b, c255.m_a);
+				fflush(stderr);
+			}
+		}
+
 		bitmap_info*	bi = render::create_bitmap_info_rgba(im);
 		delete im;
 

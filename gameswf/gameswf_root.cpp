@@ -1413,8 +1413,26 @@ namespace gameswf
 			}
 			else
 			{
-				m_movie->advance(delta_time);
-				m_time_remainder = fmod(m_time_remainder - m_frame_time, m_frame_time);
+				// sprite_instance::advance() advances exactly one timeline
+				// frame per call and IGNORES delta_time, so calling it once
+				// per render frame makes the timeline run at the RENDER rate.
+				// When rendering is slow (heavy AS3 game) the whole movie
+				// crawls and animations look frozen.  Advance once per elapsed
+				// movie frame instead (catch-up loop, capped so a long stall
+				// cannot cause an unbounded burst).
+				int guard = 0;
+				while (m_time_remainder >= m_frame_time && guard < 10)
+				{
+					m_movie->advance(m_frame_time);
+					m_time_remainder -= m_frame_time;
+					guard++;
+				}
+				if (m_time_remainder >= m_frame_time)
+				{
+					// Dropped frames beyond the cap: discard the backlog so we
+					// don't fast-forward forever after a stall.
+					m_time_remainder = 0.0f;
+				}
 			}
 
 			m_player->clear_garbage();
